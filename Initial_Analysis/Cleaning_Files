@@ -1,0 +1,61 @@
+# Recombination_Removal script keeps rows in, even though they no longer have any SNPs in, this script removes those rows from the VCF
+# Essentially same code as filtering for singletons
+import os
+
+def mutation_count(row):
+    x = 0
+    for a in range(9, len(row)):
+        x += int(row[a])
+    return x
+
+
+def cleaning_recombination_file(input_file, x, output_folder):
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    base_name = os.path.basename(input_file)
+    base_name = os.path.splitext(base_name)[0]
+
+    output_file_name = os.path.join(output_folder, f"{base_name}_foranalysis.vcf")
+
+    with open(input_file, "r") as inp, open(output_file_name, "w") as out:
+        for line in inp:
+
+            if line.startswith("#"):
+                out.write(line)
+                continue
+
+            row = line.split("\t")
+
+            if row[6].strip() != "PASS" or "," in row[4]:
+                continue
+
+            if mutation_count(row) == int(x):
+                out.write("\t".join(row))
+
+    print(f"Processed: {base_name} → {output_file_name}")
+
+
+def process_folder_alteredvcfs(folder_path, x):
+
+    output_folder = os.path.join(folder_path, "cleaned_vcfs")
+    os.makedirs(output_folder, exist_ok=True)
+
+    for filename in os.listdir(folder_path):
+
+        if not filename.endswith(".vcf"):
+            continue
+
+        full_path = os.path.join(folder_path, filename)
+
+        # skip already processed files
+        if "foranalysis" in filename:
+            continue
+
+        if not os.path.isfile(full_path):
+            continue
+
+        cleaning_recombination_file(full_path, x, output_folder)
+
+# change to relevant file path containing vcfs with recombination removed
+process_folder_alteredvcfs("altered_vcfs", 1)
