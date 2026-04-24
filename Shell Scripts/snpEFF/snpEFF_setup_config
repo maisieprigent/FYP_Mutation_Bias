@@ -1,0 +1,17 @@
+#Add this to the .config file generated when snpEFF is downloaded
+data.dir = ./data
+
+bpertussis.genome : Bordetella_pertussis
+cjejuni.genome : Campylobacter_jejuni
+ecoli.genome : Escherichia_coli
+hinfluenzae.genome : Haemophilus_influenzae
+kpneumoniae.genome : Klebsiella_pneumoniae
+lmonocytogenesA.genome : Listeria_monocytogenes_A
+mtuberculosis.genome : Mycobacterium_tuberculosis
+nmeningitidis.genome : Neisseria_meningitidis
+paeruginosa.genome : Pseudomonas_aeruginosa
+styphimurium.genome : Salmonella_typhimurium
+saureus.genome : Staphylococcus_aureus
+sepidermidis.genome : Staphylococcus_epidermidis
+sagalactiae.genome : Streptococcus_agalactiae
+spneumoniae.genome : Streptococcus_pneumoniae
