@@ -1,0 +1,46 @@
+# script to filter the original vcfs for singleton SNPs
+import os
+# counts all mutations in a row
+def mutation_count(row):
+    x = 0
+    for a in range(9, len(row)):
+        x += int(row[a])
+    return x
+# generates output folder if it doesn't exist, and uses base name of initial file, for example bpertussis.vcf and adds RarestSNPs_ to the end
+# outputs all filtered files into output folder
+def num_of_mutations(input_file, x, output_folder):
+    
+    os.makedirs(output_folder, exist_ok=True)
+    
+    base_name = os.path.basename(input_file)
+    output_file_name = f"RarestSNPs_{base_name}"
+    
+    output_path = os.path.join(output_folder, output_file_name)
+   
+    with open(input_file, "r") as inp, open(output_path, "w") as out:
+        for line in inp:
+            # ignores headers, but outwrites them to new vcf file
+            if line.startswith("#"):
+                out.write(line)
+                continue
+            # splits based on tab separation    
+            row = line.split("\t")
+            # ignores rows that don't contain a pass in column 7, or has a comma in column 5
+            if row[6].strip() != "PASS" or "," in row[4]:
+                continue
+            # outwrites the row into the new file if the mutation count = x, x is defined when the function is ran    
+            if mutation_count(row) == int(x):
+                out.writelines("\t".join (row))
+# function to loop through parsnp_files folder, so filter is applied to all .vcf in that folder
+def gather_rarest_SNPs(folder_path, x):
+    
+    for filename in os.listdir(folder_path):
+        
+        if filename.endswith(".vcf"):
+            full_path = os.path.join(folder_path, filename)
+            print(f"Processing: {filename}")
+            
+            num_of_mutations(full_path, x, "Rarest_SNPs")
+
+#run, changing "parsnp_files" to the file path containing all parsnp output vcfs, and 1 to the no. of SNPs isolating for 
+gather_rarest_SNPs("parsnp_files", 1)
