@@ -1,0 +1,11 @@
+# BASH loop to copy the gff and reference file for each genome dataset, provided they're named bpertussis.fna and bpertussis.gff for example
+# Also renamed them to sequences.fna and genes.gff, which is the standard snpEFF format
+# Separate directories need to have already been generated in the snpEFF/data directory
+for genome in bpertussis cjejuni ecoli hinfluenzae kpneumoniae lmonocytogenesA mtuberculosis nmeningitidis paeruginosa styphimurium saureus sepidermidis sagalactiae spneumoniae ; do cp "../../gff_files/${genome}.gff" "${genome}/genes.gff"; cp "../../references/${genome}.fna" "${genome}/sequences.fa"; done
+
+# BASH loop to set up databases for each genome
+#Relies on files being named as above
+for genome in bpertussis cjejuni ecoli hinfluenzae kpneumoniae lmonocytogenesA mtuberculosis nmeningitidis paeruginosa styphimurium saureus sepidermidis sagalactiae spneumoniae; do echo "Building database for $genome"; snpEff build -c snpEff.config -gff3 -v -noCheckCds -noCheckProtein "$genome"; done
+
+#BASH loop for annotating the vcfs
+mkdir -p annotated_vcfs logs for genome in bpertussis cjejuni ecoli hinfluenzae kpneumoniae lmonocytogenesA mtuberculosis nmeningitidis paeruginosa styphimurium saureus sepidermidis sagalactiae spneumoniae; do vcf="/shared/team/2025-masters-project/people/maisie/genome_files/cleaned_vcfs/${genome}_altered_foranalysis.vcf" out="annotated_vcfs/${genome}.ann.vcf" ann_log="logs/${genome}.annotate.log" if [ ! -f "$vcf" ]; then echo "Missing VCF for $genome: $vcf" continue fi echo "Annotating $genome" snpEff -c snpEff.config "$genome" "$vcf" > "$out" 2> "$ann_log" done
