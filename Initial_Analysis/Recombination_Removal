@@ -1,0 +1,184 @@
+# This file contains the code to remove suspected recombination from the filtered VCF files
+
+import os
+from collections import defaultdict
+
+#This defined recombination as 3 SNPs/ 2kb gap
+def recombination_check_master(master_file, kbgap=2000, min_snps=3):
+
+    headers = []
+    data = []
+    # same vcf parsing, ignoring the headers and assigning them to headers. 
+    # It then gets the column titles and designates everything after the 10th column as a genome header
+    # Also opens empty list for recombination to be put into
+    with open(master_file, "r") as inp:
+        for line in inp:
+            if line.startswith("#"):
+                headers.append(line.rstrip("\n"))
+            else:
+                data.append(line.strip().split("\t"))
+
+    columns = headers[-1].split("\t")
+    genomes = columns[9:]
+
+    recombination_list = []
+    # Scans for recombination
+    for genome in genomes:
+        col_idx = columns.index(genome)
+        snp_positions = defaultdict(list)
+
+        # Collect SNP positions for this genome
+        for row in data:
+            if row[col_idx] == "1":
+                chrom = row[0]
+                pos = int(row[1])
+                snp_positions[chrom].append(pos)
+
+        # Sliding window per chromosome
+        for chrom, positions in snp_positions.items():
+            positions.sort()
+
+            left = 0
+            for right in range(len(positions)):
+                while positions[right] - positions[left] > kbgap:
+                    left += 1
+
+                if right - left + 1 >= min_snps:
+                    for i in range(left, right + 1):
+                        recombination_list.append([chrom, positions[i], genome])
+
+    # Remove duplicates
+    seen = set()
+    unique = []
+    for r in recombination_list:
+        t = tuple(r)
+        if t not in seen:
+            seen.add(t)
+            unique.append(r)
+
+    print(f"Detected {len(unique)} recombination SNPs in {os.path.basename(master_file)}")
+    return unique
+
+# This section generates a list of suspected recombination and outwrites this, and a log
+# Also outwrites a new altered vcf, in which the recombination SNPs have been changed to 0s
+def altered_master_vcf(master_file, output_file, recombination_list,
+                     removed_rows_vcf, removed_changes_log):
+
+    headers = []
+    data = []
+    changes = 0
+    # Same VCF Parsing
+    with open(master_file, "r") as inp:
+        for line in inp:
+            if line.startswith("#"):
+                headers.append(line.rstrip("\n"))
+            else:
+                data.append(line.strip().split("\t"))
+
+    columns = headers[-1].split("\t")
+    col_idx = {col: i for i, col in enumerate(columns)}
+    row_idx = {(row[0], str(row[1])): i for i, row in enumerate(data)}
+
+    removed_row_indices = set()
+    removed_changes = []
+
+    for chrom, base, genome in recombination_list:
+        r = row_idx.get((chrom, str(base)))
+        c = col_idx.get(genome)
+
+        if r is not None and c is not None:
+            if data[r][c] == "1":
+                removed_row_indices.add(r)
+                removed_changes.append((chrom, str(base), genome))
+                data[r][c] = "0"
+                changes += 1
+
+    # Write altered VCF
+    with open(output_file, "w") as out:
+        for h in headers:
+            out.write(h + "\n")
+        for row in data:
+            out.write("\t".join(row) + "\n")
+
+    # Write original rows that were affected
+    with open(removed_rows_vcf, "w") as out_removed:
+        for h in headers:
+            out_removed.write(h + "\n")
+
+        original_data = []
+        with open(master_file, "r") as inp:
+            for line in inp:
+                if not line.startswith("#"):
+                    original_data.append(line.strip().split("\t"))
+
+        for r in sorted(removed_row_indices):
+            out_removed.write("\t".join(original_data[r]) + "\n")
+
+    # Write genome-specific change log
+    with open(removed_changes_log, "w") as out_log:
+        out_log.write("Chromosome\tPosition\tGenome\n")
+        for chrom, base, genome in removed_changes:
+            out_log.write(f"{chrom}\t{base}\t{genome}\n")
+
+    print(f"Wrote altered VCF: {output_file}")
+    print(f"Wrote removed rows VCF: {removed_rows_vcf}")
+    print(f"Wrote removed changes log: {removed_changes_log}")
+    print(f"Total SNPs changed: {changes}")
+
+
+def process_folder_recomb(folder_path, kbgap=2000, min_snps=3):
+
+    altered_dir = os.path.join(folder_path, "altered_vcfs")
+    removed_dir = os.path.join(folder_path, "removed_recombination")
+
+    os.makedirs(altered_dir, exist_ok=True)
+    os.makedirs(removed_dir, exist_ok=True)
+
+    for filename in os.listdir(folder_path):
+        if not filename.endswith(".vcf"):
+            continue
+
+        # avoid re-processing outputs
+        if filename.startswith("."):
+            continue
+        if filename.endswith("_altered.vcf") or filename.endswith("_removed_rows.vcf"):
+            continue
+
+        full_path = os.path.join(folder_path, filename)
+
+        # skip files inside subfolders if any
+        if not os.path.isfile(full_path):
+            continue
+
+        print(f"\nProcessing: {filename}")
+
+        base_name = os.path.splitext(filename)[0]
+
+        if base_name.startswith("RarestSNPs_"):
+          base_name = base_name[len("RarestSNPs_"):]
+
+        output_file = os.path.join(altered_dir, f"{base_name}_altered.vcf")
+        removed_rows_vcf = os.path.join(removed_dir, f"{base_name}_removed_rows.vcf")
+        removed_changes_log = os.path.join(removed_dir, f"{base_name}_removed_changes.tsv")
+
+        recombination_sites = recombination_check_master(
+            full_path,
+            kbgap=kbgap,
+            min_snps=min_snps
+        )
+
+        altered_master_vcf(
+            master_file=full_path,
+            output_file=output_file,
+            recombination_list=recombination_sites,
+            removed_rows_vcf=removed_rows_vcf,
+            removed_changes_log=removed_changes_log
+        )
+
+# Designate gap, min_snps and the folder containing Rarest_SNPs files
+if __name__ == "__main__":
+    process_folder_recomb(
+        folder_path="Rarest_SNPs",
+        kbgap=2000,
+        min_snps=3
+    )
