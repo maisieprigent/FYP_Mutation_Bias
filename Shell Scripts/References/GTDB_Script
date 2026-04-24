@@ -1,0 +1,21 @@
+# Downloaded GTDB Database using sourmash given command
+
+curl -O --no-clobber https://farm.cse.ucdavis.edu/~ctbrown/sourmash-db.new/gtdb-rs226/gtdb-rs226-k31.dna.zip
+
+#sketch outbreak genomes into sig file
+
+sourmash sketch dna path_to_fasta_files/fasta_files/*.fa -p k=31,scaled=100 -o name_genomes.sig
+
+#separate sig files
+
+cd sig_files_genomes
+sourmash sig split name_genomes.sig
+cd ..
+
+#run sourmash gather to compare to GTDB databse
+
+sourmash gather sig_files_genomes/first_file_in_folder.sig \
+    path_to_downloaded_database/GTDB_Database_Sourmash/gtdb-rs226-k31.dna.zip \
+    -o gather_results/output.csv \
+    --threshold-bp 10000 \
+    -k 31
