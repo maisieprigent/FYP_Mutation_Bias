@@ -1,0 +1,22 @@
+#Change Genus species, to example Bordetella pertussis
+
+datasets download genome taxon "Genus species" --assembly-source refseq --include genome --filename genusspecies.zip 
+unzip genusspecies.zip 
+
+#sourmash - change filepaths and name to bacteria identifier e.g. bpertussis
+
+sourmash sketch dna ncbi_dataset/data/*/*.fna -p k=31,scaled=100 -o name_ref.sig
+
+sourmash index nameref_index name_ref.sig
+
+sourmash sketch dna path_to_fasta_files/fasta_files/*.fa -p k=31,scaled=100 -o name_genomes.sig
+
+cd sig_files_genomes/
+
+sourmash sig split name_genomes.sig
+
+cd ..
+
+#Change x to one of the names of the sig files in sig_files_genomes
+
+sourmash search --dna sig_files_genomes/x name_index --containment > referenceresults.csv
