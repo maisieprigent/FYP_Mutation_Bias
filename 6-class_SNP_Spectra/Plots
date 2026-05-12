@@ -1,0 +1,243 @@
+def plot_combined_snp_spectra_facets(
+    renorm_dict,
+    mutation_order=None,
+    ncols=3,
+    figsize_per_panel=(4.8, 4.0),
+    sharey=True,
+    savepath=None,
+    dpi=300
+):
+    
+# Facets figure, split by species on the top and mutation class on the bottom
+
+    if mutation_order is None:
+        mutation_order = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
+
+#converts dictionary to dataframe
+    rows = []
+
+    for species_code, values in norm_dict.items():
+        if species_code not in GENUS_MAP:
+            print(f"Skipping {species_code}: not found in GENUS_MAP")
+            continue
+
+        genus = GENUS_MAP[species_code]
+        species_label = SPECIES_LABELS.get(species_code, species_code)
+
+        if isinstance(values, dict):
+            for mut in mutation_order:
+                rows.append({
+                    "species_code": species_code,
+                    "species_label": species_label,
+                    "genus": genus,
+                    "mutation_class": mut,
+                    "proportion": values.get(mut, np.nan)
+                })
+        else:
+            if len(values) != len(mutation_order):
+                raise ValueError(
+                    f"{species_code} has {len(values)} values, but expected "
+                    f"{len(mutation_order)} matching mutation_order."
+                )
+
+            for mut, prop in zip(mutation_order, values):
+                rows.append({
+                    "species_code": species_code,
+                    "species_label": species_label,
+                    "genus": genus,
+                    "mutation_class": mut,
+                    "proportion": prop
+                })
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        raise ValueError("No valid species from norm_dict matched GENUS_MAP.")
+
+ # orders them
+    genus_order = sorted(df["genus"].unique())
+
+    species_order_codes = [
+        s for s in GENUS_MAP
+        if s in df["species_code"].unique()
+    ]
+
+    species_order_labels = [
+        SPECIES_LABELS.get(s, s)
+        for s in species_order_codes
+    ]
+
+    df["genus"] = pd.Categorical(
+        df["genus"],
+        categories=genus_order,
+        ordered=True
+    )
+
+    df["species_label"] = pd.Categorical(
+        df["species_label"],
+        categories=species_order_labels,
+        ordered=True
+    )
+
+    df["mutation_class"] = pd.Categorical(
+        df["mutation_class"],
+        categories=mutation_order,
+        ordered=True
+    )
+
+ #species specific colours
+ 
+    species_palette = {}
+
+    for genus in genus_order:
+        genus_species_codes = [
+            s for s in species_order_codes
+            if GENUS_MAP[s] == genus
+        ]
+
+        cmap_name = GENUS_COLORMAPS.get(genus, "viridis")
+        cmap = mpl.cm.get_cmap(cmap_name)
+
+        color_positions = np.linspace(0.35, 0.8, len(genus_species_codes))
+
+        for species_code, pos in zip(genus_species_codes, color_positions):
+            label = SPECIES_LABELS.get(species_code, species_code)
+            species_palette[label] = cmap(pos)
+
+ #layout
+ 
+    n_genus_panels = len(genus_order)
+    n_mut_panels = len(mutation_order)
+
+    total_panels = n_genus_panels + n_mut_panels
+    nrows = math.ceil(total_panels / ncols)
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(
+            figsize_per_panel[0] * ncols,
+            figsize_per_panel[1] * nrows
+        ),
+        sharey=sharey
+    )
+
+    axes = np.array(axes).flatten()
+
+    panel_idx = 0
+
+  # Genus facets
+    for genus in genus_order:
+        ax = axes[panel_idx]
+        panel_idx += 1
+
+        sub = df[df["genus"] == genus].copy()
+
+        genus_species_labels = [
+            SPECIES_LABELS.get(s, s)
+            for s in species_order_codes
+            if GENUS_MAP[s] == genus
+        ]
+
+        sns.barplot(
+            data=sub,
+            x="mutation_class",
+            y="proportion",
+            hue="species_label",
+            order=mutation_order,
+            hue_order=genus_species_labels,
+            palette={k: species_palette[k] for k in genus_species_labels},
+            ax=ax,
+            dodge=True,
+            edgecolor="black",
+            linewidth=0.5
+        )
+
+        ax.set_title(f"{genus}", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Mutation class")
+        ax.set_ylabel("Proportion")
+        ax.tick_params(axis="x", rotation=45)
+
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+
+        if sharey:
+            ax.set_ylim(0, max(0.35, df["proportion"].max() * 1.1))
+
+# Class facets
+    for mut in mutation_order:
+        ax = axes[panel_idx]
+        panel_idx += 1
+
+        sub = df[df["mutation_class"] == mut].copy()
+
+        sns.barplot(
+            data=sub,
+            x="species_label",
+            y="proportion",
+            order=species_order_labels,
+            palette=species_palette,
+            ax=ax,
+            edgecolor="black",
+            linewidth=0.5
+        )
+
+        ax.set_title(f"{mut}", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Species")
+        ax.set_ylabel("Proportion")
+        ax.tick_params(axis="x", rotation=70)
+
+        if sharey:
+            ax.set_ylim(0, max(0.35, df["proportion"].max() * 1.1))
+
+    # Hide unused axes
+    for ax in axes[panel_idx:]:
+        ax.set_visible(False)
+
+# Keeps one global legend (key) as colours are same
+    handles = [
+        mpl.patches.Patch(
+            facecolor=species_palette[label],
+            edgecolor="black",
+            label=label
+        )
+        for label in species_order_labels
+    ]
+
+    fig.legend(
+        handles,
+        species_order_labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+        title="Species",
+        fontsize=14,
+        title_fontsize=16,
+        handleheight=1.75,
+        handlelength=1.75
+    )
+
+    fig.suptitle(
+        "6-class SNP spectra",
+        fontsize=16,
+        fontweight="bold",
+        y=1.02
+    )
+
+    fig.tight_layout(rect=[0, 0, 0.88, 1])
+
+    if savepath is not None:
+        fig.savefig(savepath, dpi=dpi, bbox_inches="tight")
+
+    plt.show()
+
+    return fig, axes, df
+
+#RUN THIS TO GENERATE
+
+fig, axes, df = plot_combined_snp_spectra_facets(
+    renorm_dict,   #Change to name of dictionary you want to plot with
+    savepath="combined_snp_spectra_facets.png",
+    dpi=300
+)
