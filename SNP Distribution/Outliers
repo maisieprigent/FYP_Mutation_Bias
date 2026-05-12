@@ -1,0 +1,114 @@
+import gzip
+import csv
+import numpy as np
+
+
+def open_vcf(path):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path, "r")
+
+
+def is_snp(ref, alt):
+    if len(ref) != 1:
+        return False
+    alts = alt.split(",")
+    return all(len(a) == 1 and a != "." for a in alts)
+
+
+def genotype_has_alt(gt):
+    if gt in {".", "./.", ".|."}:
+        return False
+
+    sep = "/" if "/" in gt else "|" if "|" in gt else None
+    alleles = gt.split(sep) if sep else [gt]
+
+    for a in alleles:
+        if a == ".":
+            continue
+        if a != "0":
+            return True
+    return False
+
+
+def count_snps_per_sample(vcf_file):
+    samples = []
+    snp_counts = {}
+
+    with open_vcf(vcf_file) as f:
+        for line in f:
+            if line.startswith("##"):
+                continue
+
+            if line.startswith("#CHROM"):
+                header = line.rstrip("\n").split("\t")
+                samples = header[9:]
+                snp_counts = {sample: 0 for sample in samples}
+                continue
+
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 10:
+                continue
+
+            ref = fields[3]
+            alt = fields[4]
+
+            if not is_snp(ref, alt):
+                continue
+
+            format_fields = fields[8].split(":")
+            sample_fields = fields[9:]
+
+            if "GT" not in format_fields:
+                continue
+            gt_index = format_fields.index("GT")
+
+            for sample, sample_entry in zip(samples, sample_fields):
+                parts = sample_entry.split(":")
+                if gt_index >= len(parts):
+                    continue
+
+                gt = parts[gt_index]
+                if genotype_has_alt(gt):
+                    snp_counts[sample] += 1
+
+    return snp_counts
+
+
+def write_high_outliers_to_csv(vcf_file, output_csv="high_outliers_iqr.csv"):
+    snp_counts = count_snps_per_sample(vcf_file)
+
+    samples = np.array(list(snp_counts.keys()))
+    counts = np.array(list(snp_counts.values()))
+
+    q1 = np.percentile(counts, 25)
+    q3 = np.percentile(counts, 75)
+    iqr = q3 - q1
+    high_threshold = q3 + 1.5 * iqr
+
+    print(f"Q1 = {q1}")
+    print(f"Q3 = {q3}")
+    print(f"IQR = {iqr}")
+    print(f"High outlier threshold = {high_threshold}")
+
+    high_outliers = [
+        (sample, int(count))
+        for sample, count in zip(samples, counts)
+        if count > high_threshold
+    ]
+
+    high_outliers.sort(key=lambda x: x[1], reverse=True)
+
+    with open(output_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["genome", "total_snps"])
+        writer.writerows(high_outliers)
+
+    print(f"\nWrote {len(high_outliers)} high outliers to {output_csv}")
+
+
+# Run
+vcf_file = "cleaned_vcfs/species_altered_foranalysis.vcf"   # change species to input name of file, e.g. bpertussis
+output_csv = "high_outliers_iqr_species.csv" #change species to name
+
+write_high_outliers_to_csv(vcf_file, output_csv)
