@@ -1,0 +1,38 @@
+#base composition of reference genomes 
+from collections import Counter
+
+def base_proportions(fasta_path):
+    counts = Counter()
+    total_bases = 0
+
+    with open(fasta_path, "r") as f:
+        for line in f:
+            line = line.strip().upper()
+            if not line or line.startswith(">"):
+                continue  # skip headers and empty lines
+
+            for base in line:
+                if base in "ACTG":
+                    counts[base] += 1
+                    total_bases += 1
+
+    if total_bases == 0:
+        return None
+
+    proportions = {
+        base: counts[base] / total_bases
+        for base in "ACTG"
+    }
+
+    return proportions
+
+
+if __name__ == "__main__":
+    fasta_file = "references/reference.fna"  #change reference.fna to name of file
+    props = base_proportions(fasta_file)
+
+    if props is None:
+        print("No valid bases found.")
+    else:
+        for base, prop in props.items():
+            print(f"{base}: {prop:.4f} ({prop*100:.2f}%)")
