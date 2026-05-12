@@ -1,0 +1,24 @@
+# Generating negative binomial model for ratios
+
+df_opp<- read.csv("mutation_opportunities_summary.csv")
+
+library(brms)
+
+
+fit_trinuc <- brm( n_mutations ~ mutation_class + effect_class + (1 | mutation_class:trinucleotide_context) + (1 | gr(species, cov = A)) + offset(log(opportunities)), data = df_opp, family = negbinomial(), data2 = list(A = A) )
+
+# ... refitting bug fixing, of fit_trinuc2
+
+fit_trinuc3 <- update(
+    fit_trinuc,
+    iter = 4000,
+    warmup = 2000,
+    chains = 4,
+    cores = 4,
+    control = list(
+        adapt_delta = 0.98,
+        max_treedepth = 15
+    )
+)
+
+summary (fit_trinuc3)
