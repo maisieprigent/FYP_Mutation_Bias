@@ -1,0 +1,202 @@
+library(ape)
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+
+
+species_all <- bind_rows(
+  fit_opp_multi %>% 
+    spread_draws(r_species__muCtoG[species, term]) %>% 
+    mutate(class = "C>G"),
+  
+  fit_opp_multi %>% 
+    spread_draws(r_species__muCtoT[species, term]) %>% 
+    mutate(class = "C>T"),
+  
+  fit_opp_multi %>% 
+    spread_draws(r_species__muTtoA[species, term]) %>% 
+    mutate(class = "T>A"),
+  
+  fit_opp_multi %>% 
+    spread_draws(r_species__muTtoC[species, term]) %>% 
+    mutate(class = "T>C"),
+  
+  fit_opp_multi %>% 
+    spread_draws(r_species__muTtoG[species, term]) %>% 
+    mutate(class = "T>G")
+)
+
+species_summary <- species_all %>%
+  mutate(
+    value = coalesce(
+      r_species__muCtoG,
+      r_species__muCtoT,
+      r_species__muTtoA,
+      r_species__muTtoC,
+      r_species__muTtoG
+    )
+  ) %>%
+  group_by(species, class) %>%
+  summarise(
+    mean = mean(value),
+    lower = quantile(value, 0.025, na.rm = TRUE),
+    upper = quantile(value, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+species_map <- c(
+  "paeruginosa" = "P. aeruginosa",
+  "kpneumoniae" = "K. pneumoniae",
+  "ecoli" = "E. coli",
+  "styphimurium" = "S. Typhimurium",
+  "mtuberculosis" = "M. tuberculosis",
+  "saureus" = "S. aureus",
+  "sepidermidis" = "S. epidermidis",
+  "lmonocytogenesA" = "L. monocytogenes",
+  "sagalactiae" = "S. agalactiae",
+  "spneumoniae" = "S. pneumoniae",
+  "cjejuni" = "C. jejuni",
+  "bpertussis" = "B. pertussis",
+  "nmeningitidis" = "N. meningitidis",
+  "hinfluenzae" = "H. influenzae"
+)
+
+plot_df <- species_summary %>%
+  mutate(
+    species_plot = species_map[species],
+    odds_ratio = exp(mean),
+    significant = lower > 0 | upper < 0
+  ) %>%
+  filter(!is.na(species_plot))
+
+col_order <- c("C>G", "C>T", "T>A", "T>C", "T>G")
+
+heat_mat <- plot_df %>%
+  dplyr::select(species_plot, class, odds_ratio) %>%
+  pivot_wider(names_from = class, values_from = odds_ratio) %>%
+  as.data.frame()
+
+rownames(heat_mat) <- heat_mat$species_plot
+heat_mat$species_plot <- NULL
+heat_mat <- as.matrix(heat_mat)
+
+heat_mat <- heat_mat[
+  pruned_tree$tip.label,
+  col_order
+]
+
+sig_mat <- plot_df %>%
+  dplyr::select(species_plot, class, significant) %>%
+  pivot_wider(names_from = class, values_from = significant) %>%
+  as.data.frame()
+
+rownames(sig_mat) <- sig_mat$species_plot
+sig_mat$species_plot <- NULL
+sig_mat <- as.matrix(sig_mat)
+
+sig_mat <- sig_mat[
+  pruned_tree$tip.label,
+  col_order
+]
+
+# sanity checks
+heat_mat["P. aeruginosa", "T>G"]
+sig_mat["P. aeruginosa", "T>G"]
+
+pdf("species_multinomial_odds_ratio_heatmap_sig_FIXED.pdf", width = 14, height = 8)
+
+last_x <- max(node.depth.edgelength(pruned_tree))
+x_extra <- last_x * 0.75
+
+par(mar = c(5, 1, 2, 3), xpd = NA)
+
+plot(
+  pruned_tree,
+  show.tip.label = TRUE,
+  cex = 0.8,
+  label.offset = 0.02,
+  x.lim = c(0, last_x + x_extra)
+)
+
+lastPP <- get("last_plot.phylo", envir = .PlotPhyloEnv)
+tip_y <- lastPP$yy[1:length(pruned_tree$tip.label)]
+
+x_start <- last_x + last_x * 0.25
+cell_width <- last_x * 0.045
+cell_height <- 0.32
+
+cols <- colorRampPalette(
+  c("#08306B", "#4292C6", "white", "#FB6A4A", "#A50F15")
+)(200)
+
+log_vals <- log2(heat_mat)
+zlim <- max(abs(log_vals), na.rm = TRUE)
+
+for(i in seq_len(nrow(heat_mat))) {
+  for(j in seq_len(ncol(heat_mat))) {
+    
+    val <- log2(heat_mat[i, j])
+    col_id <- round((val + zlim) / (2 * zlim) * 199) + 1
+    col_id <- max(1, min(200, col_id))
+    
+    rect(
+      xleft   = x_start + (j - 1) * cell_width,
+      ybottom = tip_y[i] - cell_height,
+      xright  = x_start + j * cell_width,
+      ytop    = tip_y[i] + cell_height,
+      col = cols[col_id],
+      border = "grey85"
+    )
+    
+    if(sig_mat[i, j]) {
+      points(
+        x = x_start + (j - 0.5) * cell_width,
+        y = tip_y[i],
+        pch = 21,
+        bg = "black",
+        col = "white",
+        cex = 0.9,
+        lwd = 0.6
+      )
+    }
+  }
+}
+
+text(
+  x = x_start + (seq_len(ncol(heat_mat)) - 0.5) * cell_width,
+  y = min(tip_y) - 0.8,
+  labels = colnames(heat_mat),
+  srt = 45,
+  adj = 1,
+  cex = 0.75
+)
+
+mtext(
+  "Species random effect",
+  side = 3,
+  line = 0,
+  at = x_start + 2.5 * cell_width,
+  cex = 0.9,
+  font = 2
+)
+
+text(
+  x = x_start + (ncol(heat_mat) * cell_width) / 2,
+  y = min(tip_y) - 2.5,
+  labels = "Black dot = 95% CI does not cross 0",
+  cex = 0.7
+)
+
+legend(
+  x = x_start + (ncol(heat_mat) * cell_width) / 2,
+  y = min(tip_y) - 1.4,
+  legend = c("4× lower", "2× lower", "1×", "2× higher", "4× higher"),
+  fill = cols[c(1, 45, 100, 155, 200)],
+  title = "Odds ratio",
+  horiz = TRUE,
+  xjust = 0.5,
+  bty = "n",
+  cex = 0.75
+)
+
+dev.off()
