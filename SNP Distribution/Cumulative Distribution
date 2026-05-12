@@ -1,0 +1,222 @@
+import gzip
+import math
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+GENUS_MAP = {
+    "bpertussis": "Bordetella",
+    "cjejuni": "Campylobacter",
+    "ecoli": "Escherichia",
+    "hinfluenzae": "Haemophilus",
+    "kpneumoniae": "Klebsiella",
+    "lmonocytogenesA": "Listeria",
+    "mtuberculosis": "Mycobacterium",
+    "nmeningitidis": "Neisseria",
+    "paeruginosa": "Pseudomonas",
+    "styphimurium": "Salmonella",
+    "saureus": "Staphylococcus",
+    "sepidermidis": "Staphylococcus",
+    "sagalactiae": "Streptococcus",
+    "spneumoniae": "Streptococcus",
+}
+
+SPECIES_LABELS = {
+    "bpertussis": "B. pertussis",
+    "cjejuni": "C. jejuni",
+    "ecoli": "E. coli",
+    "hinfluenzae": "H. influenzae",
+    "kpneumoniae": "K. pneumoniae",
+    "lmonocytogenesA": "L. monocytogenes",
+    "mtuberculosis": "M. tuberculosis",
+    "nmeningitidis": "N. meningitidis",
+    "paeruginosa": "P. aeruginosa",
+    "styphimurium": "S. typhimurium",
+    "saureus": "S. aureus",
+    "sepidermidis": "S. epidermidis",
+    "sagalactiae": "S. agalactiae",
+    "spneumoniae": "S. pneumoniae",
+}
+
+
+def open_vcf(path):
+    path = str(path)
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path, "r")
+
+
+def is_snp(ref, alt):
+    if len(ref) != 1:
+        return False
+    alts = alt.split(",")
+    return all(len(a) == 1 and a != "." for a in alts)
+
+
+def genotype_has_alt(gt):
+    if gt in {".", "./.", ".|."}:
+        return False
+
+    sep = "/" if "/" in gt else "|" if "|" in gt else None
+    alleles = gt.split(sep) if sep else [gt]
+
+    for a in alleles:
+        if a == ".":
+            continue
+        if a != "0":
+            return True
+
+    return False
+
+
+def count_snps_per_sample(vcf_file):
+    samples = []
+    snp_counts = {}
+
+    with open_vcf(vcf_file) as f:
+        for line in f:
+            if line.startswith("##"):
+                continue
+
+            if line.startswith("#CHROM"):
+                header = line.rstrip("\n").split("\t")
+                samples = header[9:]
+                snp_counts = {sample: 0 for sample in samples}
+                continue
+
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 10:
+                continue
+
+            ref = fields[3]
+            alt = fields[4]
+
+            if not is_snp(ref, alt):
+                continue
+
+            format_fields = fields[8].split(":")
+            sample_fields = fields[9:]
+
+            if "GT" not in format_fields:
+                continue
+
+            gt_index = format_fields.index("GT")
+
+            for sample, sample_entry in zip(samples, sample_fields):
+                parts = sample_entry.split(":")
+                if gt_index >= len(parts):
+                    continue
+
+                gt = parts[gt_index]
+                if genotype_has_alt(gt):
+                    snp_counts[sample] += 1
+
+    return snp_counts
+
+
+def infer_species_key(vcf_path):
+    name = Path(vcf_path).name
+
+    for key in SPECIES_LABELS:
+        if name.startswith(key):
+            return key
+
+    raise ValueError(f"Could not infer species key from filename: {name}")
+
+
+def collect_vcf_snp_counts(vcf_folder):
+    vcf_folder = Path(vcf_folder)
+
+    vcf_files = sorted(
+        list(vcf_folder.glob("*.vcf")) +
+        list(vcf_folder.glob("*.vcf.gz"))
+    )
+
+    if not vcf_files:
+        raise FileNotFoundError(f"No .vcf or .vcf.gz files found in {vcf_folder}")
+
+    records = []
+
+    for vcf_file in vcf_files:
+        species_key = infer_species_key(vcf_file)
+        genus = GENUS_MAP[species_key]
+        species_label = SPECIES_LABELS[species_key]
+
+        snp_counts = count_snps_per_sample(vcf_file)
+
+        for sample, count in snp_counts.items():
+            records.append({
+                "vcf_file": vcf_file.name,
+                "species_key": species_key,
+                "genus": genus,
+                "species_label": species_label,
+                "sample": sample,
+                "snp_count": count,
+            })
+
+    return records
+
+
+def plot_faceted_cdf(records, ncols=3):
+    species = sorted(
+        set(r["species_key"] for r in records),
+        key=lambda x: SPECIES_LABELS[x]
+    )
+
+    n_facets = len(species)
+    nrows = math.ceil(n_facets / ncols)
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(4 * ncols, 3.2 * nrows),
+        sharey=True
+    )
+
+    axes = np.array(axes).reshape(-1)
+
+    for ax, species_key in zip(axes, species):
+        counts = np.array([
+            r["snp_count"]
+            for r in records
+            if r["species_key"] == species_key
+        ])
+
+        counts = np.sort(counts)
+        cdf = np.arange(1, len(counts) + 1) / len(counts)
+
+        ax.plot(counts, cdf, marker="o", linestyle="None", markersize=3)
+
+        genus = GENUS_MAP[species_key]
+        species_label = SPECIES_LABELS[species_key]
+
+        ax.set_title(f"{species_label}\n{genus}")
+        ax.set_xlabel("Number of SNPs")
+        ax.grid(True, alpha=0.4)
+
+    for ax in axes[::ncols]:
+        ax.set_ylabel("Cumulative fraction")
+
+    for ax in axes[n_facets:]:
+        ax.axis("off")
+
+    
+    fig.suptitle("CDF of SNP counts per genome across VCF files", y=1.02)
+    plt.tight_layout()
+
+    plt.savefig(
+        "snp_cdf_faceted.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    vcf_folder = "cleaned_vcfs"
+
+    records = collect_vcf_snp_counts(vcf_folder)
+    plot_faceted_cdf(records, ncols=3)
