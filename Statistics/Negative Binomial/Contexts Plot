@@ -1,0 +1,156 @@
+library(tidybayes)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+ctx_nb <- fit_trinuc3 %>%
+  spread_draws(`r_mutation_class:trinucleotide_context`[context, term]) %>%
+  mutate(
+    mutation_class = str_sub(context, 1, 3),
+    trinucleotide_context = str_sub(context, 5)
+  ) %>%
+  group_by(mutation_class, trinucleotide_context) %>%
+  summarise(
+    mean = mean(`r_mutation_class:trinucleotide_context`),
+    lower = quantile(`r_mutation_class:trinucleotide_context`, 0.025),
+    upper = quantile(`r_mutation_class:trinucleotide_context`, 0.975),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rate_ratio = exp(mean),
+    lower_rr = exp(lower),
+    upper_rr = exp(upper)
+  )
+
+
+ctxt_plot_df <- ctx_nb %>%
+  mutate(
+    significant = lower > 0 | upper < 0
+  )
+
+row_order <- c(
+  "A_A", "A_C", "A_G", "A_T",
+  "C_A", "C_C", "C_G", "C_T",
+  "G_A", "G_C", "G_G", "G_T",
+  "T_A", "T_C", "T_G", "T_T"
+)
+
+col_order <- c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G")
+
+ctxt_mat <- ctxt_plot_df %>%
+  dplyr::select(trinucleotide_context, mutation_class, rate_ratio) %>%
+  pivot_wider(names_from = mutation_class, values_from = rate_ratio) %>%
+  as.data.frame()
+
+rownames(ctxt_mat) <- ctxt_mat$trinucleotide_context
+ctxt_mat$trinucleotide_context <- NULL
+ctxt_mat <- as.matrix(ctxt_mat)
+ctxt_mat <- ctxt_mat[row_order, col_order]
+
+ctxt_sig_mat <- ctxt_plot_df %>%
+  dplyr::select(trinucleotide_context, mutation_class, significant) %>%
+  pivot_wider(names_from = mutation_class, values_from = significant) %>%
+  as.data.frame()
+
+rownames(ctxt_sig_mat) <- ctxt_sig_mat$trinucleotide_context
+ctxt_sig_mat$trinucleotide_context <- NULL
+ctxt_sig_mat <- as.matrix(ctxt_sig_mat)
+ctxt_sig_mat <- ctxt_sig_mat[row_order, col_order]
+
+
+pdf("trinucleotide_context_rate_ratio_heatmap_sig_FIXED.pdf", width = 8, height = 6.5)
+
+par(mar = c(7, 7, 3, 2), xpd = NA)
+
+cols <- colorRampPalette(
+  c("#08306B", "#4292C6", "white", "#FB6A4A", "#A50F15")
+)(200)
+
+log_vals <- log2(ctxt_mat)
+zlim <- max(abs(log_vals), na.rm = TRUE)
+
+n_rows <- nrow(ctxt_mat)
+n_cols <- ncol(ctxt_mat)
+
+plot(
+  NA,
+  xlim = c(0, n_cols),
+  ylim = c(0, n_rows),
+  xaxt = "n",
+  yaxt = "n",
+  xlab = "",
+  ylab = "",
+  bty = "n"
+)
+
+for(i in seq_len(n_rows)) {
+  for(j in seq_len(n_cols)) {
+    
+    val <- log2(ctxt_mat[i, j])
+    col_id <- round((val + zlim) / (2 * zlim) * 199) + 1
+    col_id <- max(1, min(200, col_id))
+    
+    rect(
+      xleft = j - 1,
+      ybottom = n_rows - i,
+      xright = j,
+      ytop = n_rows - i + 1,
+      col = cols[col_id],
+      border = "grey85"
+    )
+    
+    if(ctxt_sig_mat[i, j]) {
+      points(
+        x = j - 0.5,
+        y = n_rows - i + 0.5,
+        pch = 21,
+        bg = "black",
+        col = "white",
+        cex = 1.1,
+        lwd = 0.8
+      )
+    }
+  }
+}
+
+axis(
+  side = 2,
+  at = seq(n_rows - 0.5, 0.5, by = -1),
+  labels = rownames(ctxt_mat),
+  las = 1,
+  tick = FALSE,
+  cex.axis = 0.85
+)
+
+axis(
+  side = 1,
+  at = seq(0.5, n_cols - 0.5),
+  labels = colnames(ctxt_mat),
+  las = 1,
+  tick = FALSE,
+  line = -0.5,
+  cex.axis = 0.9
+)
+
+title("Trinucleotide context random effect")
+
+text(
+  x = n_cols / 2,
+  y = -5,
+  labels = "Black dot = 95% CI does not cross 0",
+  cex = 0.8
+)
+
+legend(
+  x = n_cols / 2,
+  y = -2.4,
+  legend = c("4× lower", "2× lower", "1×", "2× higher", "4× higher"),
+  fill = cols[c(1, 45, 100, 155, 200)],
+  title = "Rate ratio",
+  horiz = TRUE,
+  xjust = 0.5,
+  bty = "n",
+  cex = 0.85
+)
+
+dev.off()
