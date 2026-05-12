@@ -1,0 +1,141 @@
+library(ape)
+library(tidybayes)
+library(dplyr)
+
+species_nb <- fit_trinuc3 %>%
+  spread_draws(r_species[species, term]) %>%
+  group_by(species) %>%
+  summarise(
+    mean = mean(r_species),
+    lower = quantile(r_species, 0.025),
+    upper = quantile(r_species, 0.975),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    rate_ratio = exp(mean),
+    lower_rr = exp(lower),
+    upper_rr = exp(upper)
+  )
+
+species_map <- c(
+  "paeruginosa" = "P. aeruginosa",
+  "kpneumoniae" = "K. pneumoniae",
+  "ecoli" = "E. coli",
+  "styphimurium" = "S. Typhimurium",
+  "mtuberculosis" = "M. tuberculosis",
+  "saureus" = "S. aureus",
+  "sepidermidis" = "S. epidermidis",
+  "lmonocytogenesA" = "L. monocytogenes",
+  "sagalactiae" = "S. agalactiae",
+  "spneumoniae" = "S. pneumoniae",
+  "cjejuni" = "C. jejuni",
+  "bpertussis" = "B. pertussis",
+  "nmeningitidis" = "N. meningitidis",
+  "hinfluenzae" = "H. influenzae"
+)
+
+plot_df <- species_nb %>%
+  mutate(
+    species_plot = species_map[species],
+    significant = lower > 0 | upper < 0
+  ) %>%
+  filter(!is.na(species_plot))
+
+rate_vec <- plot_df$rate_ratio
+names(rate_vec) <- plot_df$species_plot
+rate_vec <- rate_vec[pruned_tree$tip.label]
+
+sig_vec <- plot_df$significant
+names(sig_vec) <- plot_df$species_plot
+sig_vec <- sig_vec[pruned_tree$tip.label]
+
+# sanity checks
+rate_vec["B. pertussis"]
+sig_vec["B. pertussis"]
+
+pdf("species_negative_binomial_rate_ratio_heatmap_sig_FIXED.pdf", width = 11, height = 8)
+
+last_x <- max(node.depth.edgelength(pruned_tree))
+x_extra <- last_x * 0.5
+
+par(mar = c(5, 1, 2, 3), xpd = NA)
+
+plot(
+  pruned_tree,
+  show.tip.label = TRUE,
+  cex = 0.8,
+  label.offset = 0.02,
+  x.lim = c(0, last_x + x_extra)
+)
+
+lastPP <- get("last_plot.phylo", envir = .PlotPhyloEnv)
+tip_y <- lastPP$yy[1:length(pruned_tree$tip.label)]
+
+x_start <- last_x + last_x * 0.25
+cell_width <- last_x * 0.08
+cell_height <- 0.32
+
+cols <- colorRampPalette(
+  c("#08306B", "#4292C6", "white", "#FB6A4A", "#A50F15")
+)(200)
+
+log_vals <- log2(rate_vec)
+zlim <- max(abs(log_vals), na.rm = TRUE)
+
+for(i in seq_along(rate_vec)) {
+  
+  val <- log2(rate_vec[i])
+  col_id <- round((val + zlim) / (2 * zlim) * 199) + 1
+  col_id <- max(1, min(200, col_id))
+  
+  rect(
+    xleft   = x_start,
+    ybottom = tip_y[i] - cell_height,
+    xright  = x_start + cell_width,
+    ytop    = tip_y[i] + cell_height,
+    col = cols[col_id],
+    border = "grey85"
+  )
+  
+  if(sig_vec[i]) {
+    points(
+      x = x_start + cell_width / 2,
+      y = tip_y[i],
+      pch = 21,
+      bg = "black",
+      col = "white",
+      cex = 0.9,
+      lwd = 0.6
+    )
+  }
+}
+
+mtext(
+  "Species random effect",
+  side = 3,
+  line = 0,
+  at = x_start + cell_width / 2,
+  cex = 0.9,
+  font = 2
+)
+
+text(
+  x = x_start + cell_width / 2,
+  y = min(tip_y) - 2,
+  labels = "Black dot = 95% CI does not cross 0",
+  cex = 0.7
+)
+
+legend(
+  x = x_start + cell_width / 2,
+  y = min(tip_y) - 0.5,
+  legend = c("4× lower", "2× lower", "1×", "2× higher", "4× higher"),
+  fill = cols[c(1, 45, 100, 155, 200)],
+  title = "Rate ratio",
+  horiz = TRUE,
+  xjust = 0.5,
+  bty = "n",
+  cex = 0.75
+)
+
+dev.off()
