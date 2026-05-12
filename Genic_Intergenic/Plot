@@ -1,0 +1,485 @@
+from pathlib import Path
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
+import numpy as np
+
+
+#configuration
+
+VCF_BASE_DIR = Path("snpEFF/annotated_vcfs")
+RESOURCE_BASE_DIR = Path("snpEFF/data")
+OUTPUT_PLOT = "genic_vs_intergenic_opportunity_normalized_stacked_bar_clustered.png"
+
+GENUS_MAP = {
+    "bpertussis": "Bordetella",
+    "cjejuni": "Campylobacter",
+    "ecoli": "Escherichia",
+    "hinfluenzae": "Haemophilus",
+    "kpneumoniae": "Klebsiella",
+    "lmonocytogenesA": "Listeria",
+    "mtuberculosis": "Mycobacterium",
+    "nmeningitidis": "Neisseria",
+    "paeruginosa": "Pseudomonas",
+    "styphimurium": "Salmonella",
+    "saureus": "Staphylococcus",
+    "sepidermidis": "Staphylococcus",
+    "sagalactiae": "Streptococcus",
+    "spneumoniae": "Streptococcus",
+}
+
+SPECIES_LABELS = {
+    "bpertussis": "B. pertussis",
+    "cjejuni": "C. jejuni",
+    "ecoli": "E. coli",
+    "hinfluenzae": "H. influenzae",
+    "kpneumoniae": "K. pneumoniae",
+    "lmonocytogenesA": "L. monocytogenes",
+    "mtuberculosis": "M. tuberculosis",
+    "nmeningitidis": "N. meningitidis",
+    "paeruginosa": "P. aeruginosa",
+    "styphimurium": "S. typhimurium",
+    "saureus": "S. aureus",
+    "sepidermidis": "S. epidermidis",
+    "sagalactiae": "S. agalactiae",
+    "spneumoniae": "S. pneumoniae",
+}
+
+GENUS_COLORMAPS = {
+    "Bordetella": "copper",
+    "Campylobacter": "Greens",
+    "Escherichia": "Purples",
+    "Haemophilus": "Reds",
+    "Klebsiella": "Blues",
+    "Listeria": "Greys",
+    "Mycobacterium": "Oranges",
+    "Neisseria": "PuRd",
+    "Pseudomonas": "cool",
+    "Salmonella": "YlGn",
+    "Staphylococcus": "YlOrRd",
+    "Streptococcus": "RdPu",
+}
+
+VALID_BASES = {"A", "C", "G", "T"}
+
+
+#FASTA / gff helpers
+
+def parse_fasta(fasta_path: Path):
+    sequences = {}
+    seq_id = None
+    chunks = []
+
+    with fasta_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if seq_id is not None:
+                    sequences[seq_id] = "".join(chunks).upper()
+                seq_id = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+
+    if seq_id is not None:
+        sequences[seq_id] = "".join(chunks).upper()
+
+    return sequences
+
+
+def parse_gff_cds_intervals(gff_path: Path):
+  
+    cds_intervals = defaultdict(list)
+
+    with gff_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line or line.startswith("#"):
+                continue
+
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) != 9:
+                continue
+
+            seqid, source, feature, start, end, score, strand, phase, attributes = fields
+            if feature != "CDS":
+                continue
+
+            cds_intervals[seqid].append((int(start), int(end)))
+
+    return cds_intervals
+
+
+def merge_intervals(intervals):
+    if not intervals:
+        return []
+
+    intervals = sorted(intervals, key=lambda x: (x[0], x[1]))
+    merged = [list(intervals[0])]
+
+    for start, end in intervals[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1:
+            merged[-1][1] = max(last_end, end)
+        else:
+            merged.append([start, end])
+
+    return [(start, end) for start, end in merged]
+
+
+def count_valid_genome_bases(genome):
+    
+    total = 0
+    for seq in genome.values():
+        total += sum(1 for base in seq if base in VALID_BASES)
+    return total
+
+
+def count_valid_bases_in_intervals(genome, intervals_by_seqid):
+  
+    total = 0
+
+    for seqid, intervals in intervals_by_seqid.items():
+        if seqid not in genome:
+            continue
+
+        seq = genome[seqid]
+        merged = merge_intervals(intervals)
+
+        for start, end in merged:
+            subseq = seq[start - 1:end]
+            total += sum(1 for base in subseq if base in VALID_BASES)
+
+    return total
+
+
+def compute_species_opportunities(species_name: str):
+   
+    species_dir = RESOURCE_BASE_DIR / species_name
+    fasta_path = species_dir / "sequences.fa"
+    gff_path = species_dir / "genes.gff"
+
+    if not fasta_path.exists():
+        raise FileNotFoundError(f"Missing FASTA for {species_name}: {fasta_path}")
+    if not gff_path.exists():
+        raise FileNotFoundError(f"Missing GFF for {species_name}: {gff_path}")
+
+    genome = parse_fasta(fasta_path)
+    cds_intervals = parse_gff_cds_intervals(gff_path)
+
+    genome_valid_bases = count_valid_genome_bases(genome)
+    genic_valid_bases = count_valid_bases_in_intervals(genome, cds_intervals)
+    intergenic_valid_bases = genome_valid_bases - genic_valid_bases
+
+    if intergenic_valid_bases < 0:
+        raise ValueError(
+            f"Computed negative intergenic opportunity for {species_name}. "
+            f"Check genome/GFF coordinate consistency."
+        )
+
+    return genic_valid_bases, intergenic_valid_bases
+
+
+#VCF Counting helpers 
+
+def count_variants_in_vcf(vcf_path: Path) -> int:
+    count = 0
+    with vcf_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line and not line.startswith("#"):
+                count += 1
+    return count
+
+
+def find_species_vcfs(base_dir: Path):
+  
+    species_vcfs = []
+
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Base directory not found: {base_dir}")
+
+    for species_dir in sorted(base_dir.iterdir()):
+        if species_dir.name.startswith("."):
+            continue
+        if not species_dir.is_dir():
+            continue
+
+        species_name = species_dir.name
+
+        intergenic_vcf = species_dir / f"{species_name}_intergenic.vcf"
+        synonymous_vcf = species_dir / f"{species_name}_synonymous.vcf"
+        nonsynonymous_vcf = species_dir / f"{species_name}_nonsynonymous.vcf"
+
+        missing = [
+            p.name for p in [intergenic_vcf, synonymous_vcf, nonsynonymous_vcf]
+            if not p.exists()
+        ]
+
+        if missing:
+            print(f"Warning: missing expected files for {species_name}: {', '.join(missing)}")
+            continue
+
+        species_vcfs.append(
+            (species_name, intergenic_vcf, synonymous_vcf, nonsynonymous_vcf)
+        )
+
+    return species_vcfs
+
+
+# colour helpers
+
+def adjust_color(color, factor=1.0):
+    
+    rgb = np.array(mcolors.to_rgb(color))
+    if factor < 1:
+        return tuple(np.clip(rgb * factor, 0, 1))
+    return tuple(np.clip(rgb + (1 - rgb) * (factor - 1), 0, 1))
+
+
+def build_species_colors(species_names):
+    genus_to_species = defaultdict(list)
+    for sp in species_names:
+        genus = GENUS_MAP.get(sp, "Unknown")
+        genus_to_species[genus].append(sp)
+
+    species_colors = {}
+
+    for genus, members in genus_to_species.items():
+        members = sorted(members)
+        cmap_name = GENUS_COLORMAPS.get(genus, "tab20")
+        cmap = plt.get_cmap(cmap_name)
+
+        if len(members) == 1:
+            shade_positions = [0.65]
+        else:
+            shade_positions = np.linspace(0.45, 0.8, len(members))
+
+        for sp, pos in zip(members, shade_positions):
+            base_color = cmap(pos)
+            species_colors[sp] = {
+                "base": base_color,
+                "intergenic": adjust_color(base_color, factor=0.75),
+                "genic": adjust_color(base_color, factor=1.25),
+            }
+
+    return species_colors
+
+
+#layout helpers
+ 
+def order_species_by_genus(species_names):
+    genus_to_species = defaultdict(list)
+    for sp in species_names:
+        genus = GENUS_MAP.get(sp, "Unknown")
+        genus_to_species[genus].append(sp)
+
+    ordered_genera = sorted(genus_to_species.keys())
+
+    ordered_species = []
+    for genus in ordered_genera:
+        ordered_species.extend(sorted(genus_to_species[genus]))
+
+    return ordered_species, ordered_genera, genus_to_species
+
+
+def compute_cluster_positions(
+    ordered_species,
+    ordered_genera,
+    genus_to_species,
+    bar_width=0.8,
+    intra_gap=0.15,
+    inter_gap=1.2,
+):
+    positions = {}
+    genus_centers = {}
+
+    x = 0.0
+    for genus in ordered_genera:
+        members = sorted(genus_to_species[genus])
+        member_positions = []
+
+        for sp in members:
+            positions[sp] = x
+            member_positions.append(x)
+            x += bar_width + intra_gap
+
+        genus_centers[genus] = np.mean(member_positions)
+        x += inter_gap
+
+    return positions, genus_centers
+
+
+def build_genus_species_legend_handles(ordered_genera, genus_to_species, species_colors):
+    handles = []
+    for genus in ordered_genera:
+        members = sorted(genus_to_species[genus])
+        for sp in members:
+            handles.append(
+                mpatches.Patch(
+                    facecolor=species_colors[sp]["base"],
+                    edgecolor="black",
+                    label=f"{genus} — {SPECIES_LABELS.get(sp, sp)}"
+                )
+            )
+    return handles
+
+
+#main
+
+def main():
+    species_vcfs = find_species_vcfs(VCF_BASE_DIR)
+    if not species_vcfs:
+        raise FileNotFoundError(f"No complete species file sets found under {VCF_BASE_DIR}")
+
+    raw_results = {}
+
+    for species_name, intergenic_vcf, synonymous_vcf, nonsynonymous_vcf in species_vcfs:
+        intergenic_obs = count_variants_in_vcf(intergenic_vcf)
+        synonymous_obs = count_variants_in_vcf(synonymous_vcf)
+        nonsynonymous_obs = count_variants_in_vcf(nonsynonymous_vcf)
+        genic_obs = synonymous_obs + nonsynonymous_obs
+
+        genic_opp, intergenic_opp = compute_species_opportunities(species_name)
+
+        genic_rate = np.nan if genic_opp == 0 else genic_obs / genic_opp
+        intergenic_rate = np.nan if intergenic_opp == 0 else intergenic_obs / intergenic_opp
+
+        total_rate = 0.0
+        if not np.isnan(genic_rate):
+            total_rate += genic_rate
+        if not np.isnan(intergenic_rate):
+            total_rate += intergenic_rate
+
+        if total_rate == 0:
+            genic_norm_prop = 0.0
+            intergenic_norm_prop = 0.0
+        else:
+            genic_norm_prop = 0.0 if np.isnan(genic_rate) else genic_rate / total_rate
+            intergenic_norm_prop = 0.0 if np.isnan(intergenic_rate) else intergenic_rate / total_rate
+
+        raw_results[species_name] = {
+            "label": SPECIES_LABELS.get(species_name, species_name),
+            "genus": GENUS_MAP.get(species_name, "Unknown"),
+            "genic_obs": genic_obs,
+            "intergenic_obs": intergenic_obs,
+            "genic_opp": genic_opp,
+            "intergenic_opp": intergenic_opp,
+            "genic_rate": genic_rate,
+            "intergenic_rate": intergenic_rate,
+            "genic_norm_prop": genic_norm_prop,
+            "intergenic_norm_prop": intergenic_norm_prop,
+        }
+
+        print(
+            f"{species_name}: "
+            f"genic_obs={genic_obs}, intergenic_obs={intergenic_obs}, "
+            f"genic_opp={genic_opp}, intergenic_opp={intergenic_opp}, "
+            f"genic_rate={genic_rate}, intergenic_rate={intergenic_rate}"
+        )
+
+    species_names = list(raw_results.keys())
+    ordered_species, ordered_genera, genus_to_species = order_species_by_genus(species_names)
+    species_colors = build_species_colors(ordered_species)
+
+    positions, genus_centers = compute_cluster_positions(
+        ordered_species,
+        ordered_genera,
+        genus_to_species,
+        bar_width=0.8,
+        intra_gap=0.15,
+        inter_gap=1.2,
+    )
+
+    fig, ax = plt.subplots(figsize=(18, 8))
+
+    for sp in ordered_species:
+        x = positions[sp]
+        intergenic_prop = raw_results[sp]["intergenic_norm_prop"]
+        genic_prop = raw_results[sp]["genic_norm_prop"]
+
+        ax.bar(
+            x,
+            intergenic_prop,
+            width=0.8,
+            color=species_colors[sp]["intergenic"],
+            edgecolor="black",
+            linewidth=0.4,
+        )
+        ax.bar(
+            x,
+            genic_prop,
+            bottom=intergenic_prop,
+            width=0.8,
+            color=species_colors[sp]["genic"],
+            edgecolor="black",
+            linewidth=0.4,
+        )
+
+    xticks = [positions[sp] for sp in ordered_species]
+    xticklabels = [raw_results[sp]["label"] for sp in ordered_species]
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticklabels, rotation=60, ha="right")
+
+    for i in range(len(ordered_genera) - 1):
+        current_genus = ordered_genera[i]
+        next_genus = ordered_genera[i + 1]
+
+        current_members = sorted(genus_to_species[current_genus])
+        next_members = sorted(genus_to_species[next_genus])
+
+        right_edge = positions[current_members[-1]] + 0.4
+        left_edge = positions[next_members[0]] - 0.4
+        sep_x = (right_edge + left_edge) / 2
+
+        ax.axvline(sep_x, color="lightgray", linestyle="--", linewidth=0.8, zorder=0)
+
+    ax.set_ylabel("Opportunity-normalized proportion")
+    ax.set_xlabel("Species")
+    ax.set_title("Opportunity-normalized Genic vs Intergenic SNP Proportions", pad=25)
+    ax.set_ylim(0, 1)
+
+    mutation_handles = [
+        mpatches.Patch(facecolor="dimgray", edgecolor="black", label="Intergenic"),
+        mpatches.Patch(facecolor="lightgray", edgecolor="black", label="Genic"),
+    ]
+
+    genus_species_handles = build_genus_species_legend_handles(
+        ordered_genera, genus_to_species, species_colors
+    )
+
+    legend1 = ax.legend(
+        handles=mutation_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.06),
+        ncol=2,
+        frameon=False,
+        handlelength=1.2,
+        columnspacing=1.5,
+        borderaxespad=0.2,
+    )
+    ax.add_artist(legend1)
+
+    legend2 = ax.legend(
+        handles=genus_species_handles,
+        title="Genus / species",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.42),
+        ncol=4,
+        frameon=True,
+        fontsize=9,
+        title_fontsize=10,
+        handlelength=1.4,
+        columnspacing=1.4,
+    )
+
+    plt.subplots_adjust(bottom=0.30, top=0.88)
+    plt.savefig(OUTPUT_PLOT, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print(f"Saved plot to: {OUTPUT_PLOT}")
+
+
+if __name__ == "__main__":
+    main()
