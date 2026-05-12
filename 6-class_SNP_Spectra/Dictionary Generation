@@ -1,0 +1,105 @@
+import csv
+import os
+
+#Generates 2 dictionaries and CSV file containing information
+#1. base content normalised
+#2. base content normalised + renormalised to equal 1
+
+def generate_sixsnp_dictionaries(vcf_folder, reference_folder, output_csv="sixsnp_normalisation_summary.csv"):
+    
+
+    basecontent_dict = {}
+    renormalised_dict = {}
+
+    mutation_types = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
+
+    rows = []
+
+    for filename in os.listdir(vcf_folder):
+        if not filename.endswith(".vcf"):
+            continue
+
+        vcf_path = os.path.join(vcf_folder, filename)
+
+        if not os.path.isfile(vcf_path):
+            continue
+
+        fasta_path = find_matching_fasta(filename, reference_folder)
+
+        if fasta_path is None:
+            print(f"No FASTA found for {filename}")
+            continue
+
+        print(f"\nProcessing: {filename}")
+
+        genome_name = filename.replace("_altered_foranalysis.vcf", "")
+
+        raw_spectrum = generate_sixsnp_spectrum(vcf_path)
+
+        base_counts = count_reference_bases(fasta_path)
+
+        c_opportunities = base_counts["C"] + base_counts["G"]
+        t_opportunities = base_counts["T"] + base_counts["A"]
+
+        base_norm = normalise_by_base_content(raw_spectrum, fasta_path)
+        renorm = renormalise_spectrum(base_norm)
+
+        basecontent_dict[genome_name] = base_norm
+        renormalised_dict[genome_name] = renorm
+
+        for mutation in mutation_types:
+            ref_base = mutation[0]
+
+            if ref_base == "C":
+                opportunities = c_opportunities
+            elif ref_base == "T":
+                opportunities = t_opportunities
+            else:
+                opportunities = 0
+
+            rows.append({
+                "genome": genome_name,
+                "mutation_type": mutation,
+                "raw_count": raw_spectrum[mutation],
+                "A_count": base_counts["A"],
+                "C_count": base_counts["C"],
+                "G_count": base_counts["G"],
+                "T_count": base_counts["T"],
+                "C_opportunities_C_plus_G": c_opportunities,
+                "T_opportunities_T_plus_A": t_opportunities,
+                "opportunities_used": opportunities,
+                "base_content_normalised": base_norm[mutation],
+                "renormalised": renorm[mutation]
+            })
+
+    with open(output_csv, "w", newline="") as csvfile:
+        fieldnames = [
+            "genome",
+            "mutation_type",
+            "raw_count",
+            "A_count",
+            "C_count",
+            "G_count",
+            "T_count",
+            "C_opportunities_C_plus_G",
+            "T_opportunities_T_plus_A",
+            "opportunities_used",
+            "base_content_normalised",
+            "renormalised"
+        ]
+
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"\nCSV written to: {output_csv}")
+
+    return basecontent_dict, renormalised_dict
+
+#RUN THIS TO GENERATE
+
+basecontent_dict, renormalised_dict = generate_sixsnp_dictionaries(
+    vcf_folder="cleaned_vcfs",  #change to folder of filtered VCFs
+    reference_folder="references",  #change to folder of reference files
+    output_csv="sixsnp_normalisation_summary.csv"
+)
