@@ -1,0 +1,78 @@
+#RUN IN TERMINAL TO DOWNLOAD FILES NEEDED
+curl -O https://data.gtdb.ecogenomic.org/releases/latest/bac120_metadata.tsv.gz
+curl -O https://data.gtdb.ecogenomic.org/releases/latest/bac120.tree
+gunzip bac120_metadata.tsv.gz 
+
+#RUN IN R
+install.packages("ape")
+install.packages("phytools")
+install.packages ("brms")
+
+library(tidyverse)
+library(ape)
+
+# Reads GTDB tree and metadata files
+GTDB_METADATA_FILE <- "bac120_metadata.tsv"
+GTDB_TREE_FILE <- "bac120.tree"
+
+OUT_METADATA_CSV <- "GTDB_selected_genomes.csv"
+OUT_TREE <- "GTDB_selected_genomes.tree"
+
+# Reads above files and keeps only the information we want
+
+clean_id <- function(x) {
+  x %>%
+    str_remove("^(RS|GB)_") %>%
+    str_remove("\\..*$")
+}
+
+#Have to be GTDB accession codes- if one doesnt exist for your reference, run the sourmash command comparing FASTA to GTDB database
+
+genomes <- tribble(
+  ~species, ~accession,
+  "B. pertussis", "GCF_026001265.1",
+  "C. jejuni", "GCF_002209065.1",
+  "E. coli", "GCF_949553875.1",
+  "H. influenzae", "GCF_003351605.1",
+  "K. pneumoniae", "GCF_035594225.1",
+  "L. monocytogenes (A)", "GCF_045288145.1",
+  "M. tuberculosis", "GCF_000651815.1",
+  "N. meningitidis", "GCF_000191525.1",
+  "P. aeruginosa", "GCF_040429605.1",
+  "S. typhimurium", "GCF_011058025.1",
+  "S. aureus", "GCF_900017775.1",
+  "S. epidermidis", "GCF_000011925.1",
+  "S. agalactiae", "GCF_015221735.2",
+  "S. pneumoniae", "GCF_022068225.1",
+) %>%
+  mutate(query_id = clean_id(accession))
+
+meta <- read_tsv(GTDB_METADATA_FILE, show_col_types = FALSE) %>%
+  mutate(
+    genome_id = clean_id(accession),
+    rep_id = clean_id(gtdb_genome_representative)
+  )
+
+selected_meta <- meta %>%
+  inner_join(genomes, by = c("genome_id" = "query_id"))
+
+tree <- read.tree(GTDB_TREE_FILE) %>%
+  (\(tr) { tr$tip.label <- clean_id(tr$tip.label); tr })()
+
+tips_to_keep <- intersect(tree$tip.label, selected_meta$rep_id)
+
+pruned_tree <- drop.tip(tree, setdiff(tree$tip.label, tips_to_keep))
+
+# Outwrites the information into more condensed files
+
+write_csv(selected_meta, OUT_METADATA_CSV)
+write.tree(pruned_tree, OUT_TREE)
+
+# Takes condensed files and calculates the covariance between the species, based off the pruned tree
+
+library(phytools)
+
+pruned_tree <- force.ultrametric(pruned_tree, method = "extend")
+pruned_tree$edge.length <- pruned_tree$edge.length / max(nodeHeights(pruned_tree))
+A <- vcv.phylo(pruned_tree)
+
