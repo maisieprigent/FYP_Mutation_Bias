@@ -1,0 +1,166 @@
+library(dplyr)
+library(tidyr)
+library(brms)
+library(tidybayes)
+
+df_opp_wide <- df_opp %>%
+  group_by(species, effect_class, trinucleotide_context, mutation_class) %>%
+  summarise(
+    n = sum(n_mutations),
+    opp = sum(opportunities),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = mutation_class,
+    values_from = c(n, opp),
+    values_fill = 0
+  ) %>%
+  rename(
+    C_to_A = `n_C>A`,
+    C_to_G = `n_C>G`,
+    C_to_T = `n_C>T`,
+    T_to_A = `n_T>A`,
+    T_to_C = `n_T>C`,
+    T_to_G = `n_T>G`,
+    opp_C_to_A = `opp_C>A`,
+    opp_C_to_G = `opp_C>G`,
+    opp_C_to_T = `opp_C>T`,
+    opp_T_to_A = `opp_T>A`,
+    opp_T_to_C = `opp_T>C`,
+    opp_T_to_G = `opp_T>G`
+  ) %>%
+  mutate(
+    total_mutations = C_to_A + C_to_G + C_to_T + T_to_A + T_to_C + T_to_G,
+    
+    log_opp_C_to_G = log((opp_C_to_G + 0.5) / (opp_C_to_A + 0.5)),
+    log_opp_C_to_T = log((opp_C_to_T + 0.5) / (opp_C_to_A + 0.5)),
+    log_opp_T_to_A = log((opp_T_to_A + 0.5) / (opp_C_to_A + 0.5)),
+    log_opp_T_to_C = log((opp_T_to_C + 0.5) / (opp_C_to_A + 0.5)),
+    log_opp_T_to_G = log((opp_T_to_G + 0.5) / (opp_C_to_A + 0.5))
+  ) %>%
+  filter(total_mutations > 0)
+
+priors_opp_multi <- c(
+  prior(normal(0, 1), class = "b", dpar = "muCtoG"),
+  prior(normal(0, 1), class = "b", dpar = "muCtoT"),
+  prior(normal(0, 1), class = "b", dpar = "muTtoA"),
+  prior(normal(0, 1), class = "b", dpar = "muTtoC"),
+  prior(normal(0, 1), class = "b", dpar = "muTtoG"),
+  
+  prior(exponential(2), class = "sd", group = "species", dpar = "muCtoG"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muCtoT"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muTtoA"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muTtoC"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muTtoG"),
+  
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muCtoG"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muCtoT"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muTtoA"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muTtoC"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muTtoG")
+)
+
+fit_opp_multi <- brm(
+  bf(
+    cbind(C_to_A, C_to_G, C_to_T, T_to_A, T_to_C, T_to_G) | trials(total_mutations) ~
+      effect_class +
+      (1 | gr(species, cov = A)) +
+      (1 | trinucleotide_context),
+    
+    muCtoG ~ . + offset(log_opp_C_to_G),
+    muCtoT ~ . + offset(log_opp_C_to_T),
+    muTtoA ~ . + offset(log_opp_T_to_A),
+    muTtoC ~ . + offset(log_opp_T_to_C),
+    muTtoG ~ . + offset(log_opp_T_to_G)
+  ),
+  data = df_opp_wide,
+  family = multinomial(refcat = "C_to_A"),
+  data2 = list(A = A),
+  prior = priors_opp_multi,
+  iter = 4000,
+  warmup = 2000,
+  chains = 4,
+  cores = 4,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+
+summary(fit_opp_multi)
+
+
+
+
+
+
+form_opp_multi <- bf(
+  cbind(C_to_A, C_to_G, C_to_T, T_to_A, T_to_C, T_to_G) | trials(total_mutations) ~
+    0,
+  
+  muCtoG ~ effect_class +
+    offset(log_opp_C_to_G) +
+    (1 | gr(species, cov = A)) +
+    (1 | trinucleotide_context),
+  
+  muCtoT ~ effect_class +
+    offset(log_opp_C_to_T) +
+    (1 | gr(species, cov = A)) +
+    (1 | trinucleotide_context),
+  
+  muTtoA ~ effect_class +
+    offset(log_opp_T_to_A) +
+    (1 | gr(species, cov = A)) +
+    (1 | trinucleotide_context),
+  
+  muTtoC ~ effect_class +
+    offset(log_opp_T_to_C) +
+    (1 | gr(species, cov = A)) +
+    (1 | trinucleotide_context),
+  
+  muTtoG ~ effect_class +
+    offset(log_opp_T_to_G) +
+    (1 | gr(species, cov = A)) +
+    (1 | trinucleotide_context)
+)
+get_prior(
+  form_opp_multi,
+  data = df_opp_wide,
+  family = multinomial(refcat = "C_to_A"),
+  data2 = list(A = A)
+)
+
+priors_opp_multi <- c(
+  prior(normal(0, 1), class = "b", dpar = "muCtoG"),
+  prior(normal(0, 1), class = "b", dpar = "muCtoT"),
+  prior(normal(0, 1), class = "b", dpar = "muTtoA"),
+  prior(normal(0, 1), class = "b", dpar = "muTtoC"),
+  prior(normal(0, 1), class = "b", dpar = "muTtoG"),
+  
+  prior(student_t(3, 0, 2.5), class = "Intercept", dpar = "muCtoG"),
+  prior(student_t(3, 0, 2.5), class = "Intercept", dpar = "muCtoT"),
+  prior(student_t(3, 0, 2.5), class = "Intercept", dpar = "muTtoA"),
+  prior(student_t(3, 0, 2.5), class = "Intercept", dpar = "muTtoC"),
+  prior(student_t(3, 0, 2.5), class = "Intercept", dpar = "muTtoG"),
+  
+  prior(exponential(2), class = "sd", group = "species", dpar = "muCtoG"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muCtoT"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muTtoA"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muTtoC"),
+  prior(exponential(2), class = "sd", group = "species", dpar = "muTtoG"),
+  
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muCtoG"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muCtoT"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muTtoA"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muTtoC"),
+  prior(exponential(2), class = "sd", group = "trinucleotide_context", dpar = "muTtoG")
+)
+fit_opp_multi <- brm(
+  form_opp_multi,
+  data = df_opp_wide,
+  family = multinomial(refcat = "C_to_A"),
+  data2 = list(A = A),
+  prior = priors_opp_multi,
+  iter = 4000,
+  warmup = 2000,
+  chains = 4,
+  cores = 4,
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
