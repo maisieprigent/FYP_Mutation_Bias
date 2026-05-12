@@ -1,0 +1,240 @@
+import os
+import re
+import pandas as pd
+from collections import defaultdict
+from Bio import SeqIO
+from Bio.Seq import Seq
+import pysam
+
+# Include all species in list
+species_list = ["bpertussis", "cjejuni", "ecoli", "hinfluenzae", "kpneumoniae", "lmonocytogenesA", "mtuberculosis", "nmeningitidis", "paeruginosa", "sagalactiae", "saureus", "sepidermidis", "spneumoniae", "styphimurium"]
+
+data_dir = "stats"  # folder containing ecoli.vcf, ecoli.gff, ecoli.fna, etc.
+
+mutation_classes = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
+bases = ["A", "C", "G", "T"]
+contexts = [f"{l}_{r}" for l in bases for r in bases]
+effect_classes = ["synonymous", "non-synonymous", "intergenic"]
+
+
+def load_reference(fasta_path):
+    return {rec.id: str(rec.seq).upper() for rec in SeqIO.parse(fasta_path, "fasta")}
+
+
+def parse_gff_cds(gff_path):
+  
+    cds_by_contig = defaultdict(list)
+
+    with open(gff_path) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 9:
+                continue
+
+            contig, source, feature_type, start, end, score, strand, phase, attrs = parts
+
+            if feature_type != "CDS":
+                continue
+
+            cds_by_contig[contig].append({
+                "start": int(start) - 1,
+                "end": int(end),
+                "strand": strand,
+                "phase": int(phase) if phase.isdigit() else 0,
+                "attrs": attrs,
+            })
+
+    return cds_by_contig
+
+
+def find_cds(contig, pos0, cds_by_contig):
+    for cds in cds_by_contig.get(contig, []):
+        if cds["start"] <= pos0 < cds["end"]:
+            return cds
+    return None
+
+
+def canonical_mutation(ref, alt, left, right):
+    
+    comp = str.maketrans("ACGT", "TGCA")
+
+    if ref in ["C", "T"]:
+        mutation_class = f"{ref}>{alt}"
+        context = f"{left}_{right}"
+    else:
+        mutation_class = f"{ref.translate(comp)}>{alt.translate(comp)}"
+        context = f"{right.translate(comp)}_{left.translate(comp)}"
+
+    return mutation_class, context
+
+
+def classify_effect(contig, pos0, ref, alt, reference, cds_by_contig):
+    cds = find_cds(contig, pos0, cds_by_contig)
+
+    if cds is None:
+        return "intergenic", True
+
+    seq = reference[contig][cds["start"]:cds["end"]]
+
+    if cds["strand"] == "-":
+        seq = str(Seq(seq).reverse_complement())
+        cds_pos = cds["end"] - 1 - pos0
+        ref_coding = str(Seq(ref).reverse_complement())
+        alt_coding = str(Seq(alt).reverse_complement())
+    else:
+        cds_pos = pos0 - cds["start"]
+        ref_coding = ref
+        alt_coding = alt
+
+    codon_start = (cds_pos // 3) * 3
+    codon = seq[codon_start:codon_start + 3]
+
+    if len(codon) != 3 or "N" in codon:
+        return "non-synonymous", False
+
+    mutated_codon = list(codon)
+    mutated_codon[cds_pos % 3] = alt_coding
+    mutated_codon = "".join(mutated_codon)
+
+    aa_ref = str(Seq(codon).translate())
+    aa_alt = str(Seq(mutated_codon).translate())
+
+    if aa_ref == aa_alt:
+        return "synonymous", False
+    else:
+        return "non-synonymous", False
+
+
+def count_mutations(species, vcf_path, reference, cds_by_contig):
+    counts = defaultdict(int)
+
+    vcf = pysam.VariantFile(vcf_path)
+
+    for rec in vcf.fetch():
+        contig = rec.contig
+        pos0 = rec.pos - 1
+
+        if contig not in reference:
+            continue
+
+        ref = rec.ref.upper()
+
+        if len(ref) != 1 or ref not in "ACGT":
+            continue
+
+        if pos0 == 0 or pos0 >= len(reference[contig]) - 1:
+            continue
+
+        left = reference[contig][pos0 - 1]
+        right = reference[contig][pos0 + 1]
+
+        if left not in "ACGT" or right not in "ACGT":
+            continue
+
+        for alt in rec.alts or []:
+            alt = alt.upper()
+
+            if len(alt) != 1 or alt not in "ACGT":
+                continue
+
+            mutation_class, context = canonical_mutation(ref, alt, left, right)
+            effect_class, intergenic = classify_effect(
+                contig, pos0, ref, alt, reference, cds_by_contig
+            )
+
+            key = (
+                species,
+                mutation_class,
+                context,
+                effect_class,
+                intergenic,
+            )
+            counts[key] += 1
+
+    return counts
+
+
+def count_opportunities(species, reference, cds_by_contig):
+   
+    opps = defaultdict(int)
+
+    for contig, seq in reference.items():
+        for pos0 in range(1, len(seq) - 1):
+            ref = seq[pos0]
+            left = seq[pos0 - 1]
+            right = seq[pos0 + 1]
+
+            if ref not in "ACGT" or left not in "ACGT" or right not in "ACGT":
+                continue
+
+            for alt in bases:
+                if alt == ref:
+                    continue
+
+                mutation_class, context = canonical_mutation(ref, alt, left, right)
+                effect_class, intergenic = classify_effect(
+                    contig, pos0, ref, alt, reference, cds_by_contig
+                )
+
+                key = (
+                    species,
+                    mutation_class,
+                    context,
+                    effect_class,
+                    intergenic,
+                )
+                opps[key] += 1
+
+    return opps
+
+
+all_rows = []
+
+for species in species_list:
+    print(f"Processing {species}...")
+
+    vcf_path = os.path.join(data_dir, f"{species}.vcf")
+    gff_path = os.path.join(data_dir, f"{species}.gff")
+    fasta_path = os.path.join(data_dir, f"{species}.fna")
+
+    reference = load_reference(fasta_path)
+    cds_by_contig = parse_gff_cds(gff_path)
+
+    mutation_counts = count_mutations(species, vcf_path, reference, cds_by_contig)
+    opportunity_counts = count_opportunities(species, reference, cds_by_contig)
+
+    all_keys = set(mutation_counts) | set(opportunity_counts)
+
+    for key in sorted(all_keys):
+        sp, mutation_class, context, effect_class, intergenic = key
+
+        all_rows.append({
+            "species": sp,
+            "mutation_class": mutation_class,
+            "trinucleotide_context": context,
+            "effect_class": effect_class,
+            "intergenic": intergenic,
+            "n_mutations": mutation_counts.get(key, 0),
+            "opportunities": opportunity_counts.get(key, 0),
+        })
+
+df = pd.DataFrame(all_rows)
+
+df = df[
+    [
+        "species",
+        "mutation_class",
+        "trinucleotide_context",
+        "effect_class",
+        "intergenic",
+        "n_mutations",
+        "opportunities",
+    ]
+]
+
+df.head()
+
+df.to_csv("mutation_opportunities_summary.csv", index=False) #change to what name you want your csv
