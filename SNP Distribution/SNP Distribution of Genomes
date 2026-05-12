@@ -1,0 +1,209 @@
+import gzip
+import re
+import math
+import pandas as pd
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+counts_file = "extra_work/results_checker/outliers/high_outliers_iqr_species.csv"   # CSV file from outliers code, change species
+vcf_file = "cleaned_vcfs/species_altered_foranalysis.vcf"           # change species
+output_png = "top10_snp_distribution_1kb_species.png"      #change species to name of file
+
+bin_size = 1000
+top_n = 10
+
+
+# helpers
+
+def open_vcf(path):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt")
+    return open(path, "r")
+
+
+def read_counts_table(path):
+  
+    try:
+        df = pd.read_csv(path)
+        if df.shape[1] == 1:
+            df = pd.read_csv(path, sep="\t")
+    except Exception:
+        df = pd.read_csv(path, sep="\t")
+
+    # Standardize first two columns if needed
+    if "sample" not in df.columns or "snp_count" not in df.columns:
+        df = df.iloc[:, :2].copy()
+        df.columns = ["sample", "snp_count"]
+
+    df["snp_count"] = pd.to_numeric(df["snp_count"], errors="coerce")
+    df = df.dropna(subset=["snp_count"])
+    return df
+
+
+def is_simple_snp(ref, alt):
+    # Keep only simple biallelic SNPs
+    if "," in alt:
+        return False
+    return len(ref) == 1 and len(alt) == 1
+
+
+def sample_has_snp(sample_field):
+    # GT is first field before colon
+    gt = sample_field.split(":", 1)[0]
+
+    if gt in {".", "./.", ".|."}:
+        return False
+
+    alleles = re.split(r"[\/|]", gt)
+    return any(a not in {"0", "."} for a in alleles)
+
+
+#reads top 10 genomes from CSV
+
+counts_df = read_counts_table(counts_file)
+top_samples = (
+    counts_df.sort_values("snp_count", ascending=False)
+    .head(top_n)["sample"]
+    .tolist()
+)
+
+print("Top 10 genomes:")
+for s in top_samples:
+    print(s)
+
+
+#scan VCF 
+
+sample_indices = {}
+positions_by_sample = {s: [] for s in top_samples}
+
+chrom_order = []
+chrom_seen = set()
+chrom_max_pos = defaultdict(int)
+
+with open_vcf(vcf_file) as f:
+    for line in f:
+        if line.startswith("##"):
+            continue
+
+        if line.startswith("#CHROM"):
+            header = line.rstrip("\n").split("\t")
+            vcf_samples = header[9:]
+
+            for sample in top_samples:
+                if sample not in vcf_samples:
+                    raise ValueError(f"Sample '{sample}' not found in VCF header.")
+                sample_indices[sample] = vcf_samples.index(sample)
+
+            print("Matched all top 10 genomes in VCF.")
+            continue
+
+        fields = line.rstrip("\n").split("\t")
+        chrom = fields[0]
+        pos = int(fields[1])
+        ref = fields[3]
+        alt = fields[4]
+
+        # track chromosome order and length-like max position
+        if chrom not in chrom_seen:
+            chrom_seen.add(chrom)
+            chrom_order.append(chrom)
+
+        if pos > chrom_max_pos[chrom]:
+            chrom_max_pos[chrom] = pos
+
+        # SNP filter
+        if not is_simple_snp(ref, alt):
+            continue
+
+        # check each of the top 10 samples
+        for sample in top_samples:
+            idx = sample_indices[sample]
+            sample_field = fields[9 + idx]
+
+            if sample_has_snp(sample_field):
+                positions_by_sample[sample].append((chrom, pos))
+
+
+#concatenated genome coordinates
+
+chrom_offsets = {}
+running_offset = 0
+
+for chrom in chrom_order:
+    chrom_offsets[chrom] = running_offset
+    running_offset += chrom_max_pos[chrom]
+
+genome_length = running_offset
+
+chrom_boundaries = [chrom_offsets[c] for c in chrom_order[1:]]
+chrom_midpoints = []
+for chrom in chrom_order:
+    start = chrom_offsets[chrom]
+    end = start + chrom_max_pos[chrom]
+    chrom_midpoints.append((chrom, (start + end) / 2))
+
+
+#1kb bins
+
+n_bins = math.ceil(genome_length / bin_size)
+bin_starts = [i * bin_size for i in range(n_bins)]
+
+binned_counts = {}
+
+for sample in top_samples:
+    counts = [0] * n_bins
+
+    for chrom, pos in positions_by_sample[sample]:
+        genome_pos = chrom_offsets[chrom] + pos
+        bin_idx = (genome_pos - 1) // bin_size
+        if 0 <= bin_idx < n_bins:
+            counts[bin_idx] += 1
+
+    binned_counts[sample] = counts
+
+
+#plot faceted figure
+
+ncols = 2
+nrows = math.ceil(len(top_samples) / ncols)
+
+fig, axes = plt.subplots(
+    nrows=nrows,
+    ncols=ncols,
+    figsize=(18, 3.5 * nrows),
+    squeeze=False
+)
+axes = axes.flatten()
+
+global_ymax = max(max(v) for v in binned_counts.values()) if binned_counts else 1
+
+for i, sample in enumerate(top_samples):
+    ax = axes[i]
+
+    ax.bar(bin_starts, binned_counts[sample], width=bin_size, align="edge")
+    ax.set_title(sample)
+    ax.set_xlim(0, genome_length)
+    ax.set_ylim(0, global_ymax * 1.05 if global_ymax > 0 else 1)
+
+    ax.set_xlabel("Genome position")
+    ax.set_ylabel("No. of SNPs")
+
+    # chromosome boundary markers
+    for boundary in chrom_boundaries:
+        ax.axvline(boundary, linewidth=0.8)
+
+    # optional chromosome labels
+    ax.set_xticks([mid for _, mid in chrom_midpoints])
+    ax.set_xticklabels([chrom for chrom, _ in chrom_midpoints], rotation=90)
+
+# hide any unused panels
+for j in range(len(top_samples), len(axes)):
+    axes[j].axis("off")
+
+fig.suptitle("SNP distribution plots for top 10 genomes (1 kb bins)", y=0.995)
+plt.tight_layout()
+plt.savefig(output_png, dpi=300, bbox_inches="tight")
+plt.show()
+
+print(f"Saved figure to: {output_png}")
