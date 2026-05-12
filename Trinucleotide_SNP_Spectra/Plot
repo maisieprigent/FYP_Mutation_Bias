@@ -1,0 +1,121 @@
+def plot_faceted_genus_context_spectra_bars(
+    all_contexts_r,
+    output_file="faceted_genus_context_spectra_bars_2col_x-axis.png",
+    ncols=2,
+    sharey=True,
+    gap_size=2
+):
+    import math
+
+    mutation_types = ["C>A", "C>G", "C>T", "T>A", "T>C", "T>G"]
+    bases = ["A", "C", "G", "T"]
+
+    # Build contexts grouped by mutation
+    contexts_by_mut = {
+        mut: [f"{l}[{mut}]{r}" for l in bases for r in bases]
+        for mut in mutation_types
+    }
+
+    contexts = []
+    x_positions = []
+    mut_boundaries = []
+
+    current_x = 0
+    for mut in mutation_types:
+        for ctx in contexts_by_mut[mut]:
+            contexts.append(ctx)
+            x_positions.append(current_x)
+            current_x += 1
+
+        mut_boundaries.append(current_x - 0.5)
+        current_x += gap_size  # spacing between mutation classes
+
+    genus_to_species = get_species_by_genus(all_contexts_r)
+    genera = list(genus_to_species.keys())
+
+    n_panels = len(genera)
+    nrows = math.ceil(n_panels / ncols)
+
+    # Increase panel height so x labels fit under every subplot
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(9 * ncols, 5.8 * nrows),
+        sharex=False,
+        sharey=sharey
+    )
+
+    axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+
+    for ax, genus in zip(axes, genera):
+        species_list = genus_to_species[genus]
+        species_colors = get_species_colors_for_genus(species_list, genus)
+
+        n_species = len(species_list)
+        width = 0.8 / n_species
+
+        for i, species in enumerate(species_list):
+            y = [all_contexts_r[species].get(ctx, 0.0) for ctx in contexts]
+            offsets = [x + (i - (n_species - 1) / 2) * width for x in x_positions]
+
+            ax.bar(
+                offsets,
+                y,
+                width=width,
+                color=species_colors[species],
+                label=SPECIES_LABELS.get(species, species),
+                alpha=0.95
+            )
+
+        # dashed mutation boundaries
+        for b in mut_boundaries[:-1]:
+            ax.axvline(b, linestyle="--", linewidth=1, alpha=0.4)
+
+        ax.set_title(genus, fontweight="bold")
+        ax.set_ylabel("Proportion")
+        ax.set_xlabel("Context")
+
+        # Put context labels below every graph, with enough room
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(contexts, rotation=90, fontsize=5, va="top")
+        ax.tick_params(axis="x", pad=2)
+
+        ax.grid(axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+
+        ax.legend(
+            frameon=False,
+            fontsize=8,
+            loc="upper right",
+            title="Species",
+            title_fontsize=9
+        )
+
+
+    # hide empty panels
+    for ax in axes[len(genera):]:
+        ax.set_visible(False)
+
+    fig.suptitle(
+        "Context-normalised Trinucleotide Spectra",
+        fontsize=16,
+        fontweight="bold",
+        y=0.97
+    )
+
+    # Key layout fix:
+    # - hspace gives vertical room between rows
+    # - bottom/top/left/right keep labels from being clipped
+    fig.subplots_adjust(
+        left=0.07,
+        right=0.98,
+        bottom=0.12,
+        top=0.95,
+        wspace=0.18,
+        hspace=0.65
+    )
+
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.show()
+
+plot_faceted_genus_context_spectra_bars(all_contexts_r) #Change to name of dictionary using
