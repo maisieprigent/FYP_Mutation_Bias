@@ -1,0 +1,333 @@
+import os
+from collections import defaultdict
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from intervaltree import IntervalTree
+import matplotlib.cm as cm
+
+%matplotlib inline
+
+#place to edit file paths
+SNPEFF_ROOT = "snpEFF"   # top-level snpEFF directory
+AMBIGUOUS = "first"               # "first", "all", or "skip", if snpEFF annotation is ambiguous
+PASS_ONLY = False
+FIGSIZE = (14, 7)
+
+GENUS_MAP = {
+    "bpertussis": "Bordetella",
+    "cjejuni": "Campylobacter",
+    "ecoli": "Escherichia",
+    "hinfluenzae": "Haemophilus",
+    "kpneumoniae": "Klebsiella",
+    "lmonocytogenesA": "Listeria",
+    "mtuberculosis": "Mycobacterium",
+    "nmeningitidis": "Neisseria",
+    "paeruginosa": "Pseudomonas",
+    "styphimurium": "Salmonella",
+    "saureus": "Staphylococcus",
+    "sepidermidis": "Staphylococcus",
+    "sagalactiae": "Streptococcus",
+    "spneumoniae": "Streptococcus",
+}
+
+SPECIES_LABELS = {
+    "bpertussis": "B. pertussis",
+    "cjejuni": "C. jejuni",
+    "ecoli": "E. coli",
+    "hinfluenzae": "H. influenzae",
+    "kpneumoniae": "K. pneumoniae",
+    "lmonocytogenesA": "L. monocytogenes",
+    "mtuberculosis": "M. tuberculosis",
+    "nmeningitidis": "N. meningitidis",
+    "paeruginosa": "P. aeruginosa",
+    "styphimurium": "S. typhimurium",
+    "saureus": "S. aureus",
+    "sepidermidis": "S. epidermidis",
+    "sagalactiae": "S. agalactiae",
+    "spneumoniae": "S. pneumoniae",
+}
+
+GENUS_COLORMAPS = {
+    "Bordetella": "copper",
+    "Campylobacter": "Greens",
+    "Escherichia": "Purples",
+    "Haemophilus": "Reds",
+    "Klebsiella": "Blues",
+    "Listeria": "Greys",
+    "Mycobacterium": "Oranges",
+    "Neisseria": "PuRd",
+    "Pseudomonas": "cool",
+    "Salmonella": "YlGn",
+    "Staphylococcus": "YlOrRd",
+    "Streptococcus": "RdPu",
+}
+
+def parse_gff_attributes(attr_string):
+    attrs = {}
+    for item in attr_string.strip().split(";"):
+        if not item:
+            continue
+        if "=" in item:
+            k, v = item.split("=", 1)
+            attrs[k] = v
+        elif " " in item:
+            k, v = item.split(" ", 1)
+            attrs[k] = v.strip('"')
+    return attrs
+
+def normalize_seqid(x):
+    return str(x).strip()
+
+def discover_datasets(snpeff_root):
+    data_dir = os.path.join(snpeff_root, "data")
+    ann_dir = os.path.join(snpeff_root, "annotated_vcfs")
+    datasets = []
+
+    for dataset in sorted(os.listdir(data_dir)):
+        dataset_dir = os.path.join(data_dir, dataset)
+        if not os.path.isdir(dataset_dir):
+            continue
+
+        gff_file = os.path.join(dataset_dir, "genes.gff")
+        ann_vcf_file = os.path.join(ann_dir, dataset, f"{dataset}.ann.vcf")
+
+        if os.path.exists(gff_file) and os.path.exists(ann_vcf_file):
+            datasets.append({
+                "dataset": dataset,
+                "gff": gff_file,
+                "vcf": ann_vcf_file,
+            })
+    return datasets
+
+def load_cds_models(gff_file):
+    cds_models = defaultdict(lambda: {"seqid": None, "strand": None, "parts": []})
+    cds_trees = defaultdict(IntervalTree)
+
+    with open(gff_file) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) != 9:
+                continue
+
+            seqid, source, feature_type, start, end, score, strand, phase, attributes = fields
+            if feature_type != "CDS":
+                continue
+
+            seqid = normalize_seqid(seqid)
+            start0 = int(start) - 1
+            end0 = int(end)
+            attrs = parse_gff_attributes(attributes)
+
+            transcript_id = (
+                attrs.get("Parent")
+                or attrs.get("ID")
+                or attrs.get("transcript_id")
+                or attrs.get("gene")
+                or attrs.get("locus_tag")
+                or f"{seqid}:{start0}-{end0}:{strand}"
+            )
+
+            cds_models[transcript_id]["seqid"] = seqid
+            cds_models[transcript_id]["strand"] = strand
+            cds_models[transcript_id]["parts"].append((start0, end0))
+            cds_trees[seqid].addi(start0, end0, transcript_id)
+
+    for transcript_id, model in cds_models.items():
+        if model["strand"] == "+":
+            model["parts"] = sorted(model["parts"], key=lambda x: x[0])
+        else:
+            model["parts"] = sorted(model["parts"], key=lambda x: x[0], reverse=True)
+
+    return cds_models, cds_trees
+
+def get_overlapping_transcripts(cds_trees, seqid, pos0):
+    seqid = normalize_seqid(seqid)
+    if seqid not in cds_trees:
+        return []
+    return [iv.data for iv in cds_trees[seqid].at(pos0)]
+
+def cds_offset_for_pos(model, genomic_pos0):
+    offset = 0
+    strand = model["strand"]
+
+    for start0, end0 in model["parts"]:
+        seg_len = end0 - start0
+        if start0 <= genomic_pos0 < end0:
+            if strand == "+":
+                return offset + (genomic_pos0 - start0)
+            else:
+                return offset + (end0 - 1 - genomic_pos0)
+        offset += seg_len
+    return None
+
+def codon_position_from_offset(cds_offset0):
+    return (cds_offset0 % 3) + 1
+
+def iter_simple_vcf(vcf_path, pass_only=False):
+    with open(vcf_path) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith("#"):
+                continue
+
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 8:
+                continue
+
+            chrom, pos, vid, ref, alt, qual, filt, info = fields[:8]
+
+            if "," in alt:
+                continue
+            if len(ref) != 1 or len(alt) != 1:
+                continue
+            if pass_only and filt not in ("PASS", "."):
+                continue
+
+            yield {
+                "contig": chrom,
+                "pos": int(pos),
+                "ref": ref,
+                "alt": alt,
+            }
+
+def make_genus_colors(ordered_datasets):
+    genus_to_members = defaultdict(list)
+    for ds in ordered_datasets:
+        genus_to_members[GENUS_MAP.get(ds, "Other")].append(ds)
+
+    color_map = {}
+    for genus, members in genus_to_members.items():
+        cmap_name = GENUS_COLORMAPS.get(genus, "viridis")
+        cmap = cm.get_cmap(cmap_name)
+
+        if len(members) == 1:
+            values = [0.65]
+        else:
+            values = np.linspace(0.40, 0.85, len(members))
+
+        for ds, v in zip(members, values):
+            color_map[ds] = cmap(v)
+
+    return color_map
+
+datasets = discover_datasets(SNPEFF_ROOT)
+if not datasets:
+    raise ValueError("No complete datasets found.")
+
+summary_rows = []
+
+for ds in datasets:
+    dataset_name = ds["dataset"]
+    cds_models, cds_trees = load_cds_models(ds["gff"])
+    codon_counts = {1: 0, 2: 0, 3: 0}
+
+    for rec in iter_simple_vcf(ds["vcf"], pass_only=PASS_ONLY):
+        seqid = normalize_seqid(rec["contig"])
+        pos0 = rec["pos"] - 1
+        overlapping = get_overlapping_transcripts(cds_trees, seqid, pos0)
+
+        if not overlapping:
+            continue
+
+        if len(overlapping) > 1:
+            if AMBIGUOUS == "skip":
+                continue
+            elif AMBIGUOUS == "first":
+                overlapping = [sorted(overlapping)[0]]
+            elif AMBIGUOUS == "all":
+                overlapping = sorted(overlapping)
+
+        for transcript_id in overlapping:
+            model = cds_models[transcript_id]
+            cds_offset0 = cds_offset_for_pos(model, pos0)
+            if cds_offset0 is None:
+                continue
+            codon_pos = codon_position_from_offset(cds_offset0)
+            codon_counts[codon_pos] += 1
+
+    total = sum(codon_counts.values())
+    for pos in [1, 2, 3]:
+        summary_rows.append({
+            "dataset": dataset_name,
+            "genus": GENUS_MAP.get(dataset_name, "Unknown"),
+            "label": SPECIES_LABELS.get(dataset_name, dataset_name),
+            "codon_position": pos,
+            "proportion": (codon_counts[pos] / total) if total > 0 else 0.0
+        })
+
+# ---- ORDER DATASETS BY GENUS THEN SPECIES ----
+ordered_datasets = sorted(
+    plot_df["dataset"].unique(),
+    key=lambda ds: (GENUS_MAP.get(ds, "ZZZ"), SPECIES_LABELS.get(ds, ds))
+)
+
+plot_df["dataset"] = pd.Categorical(plot_df["dataset"], categories=ordered_datasets, ordered=True)
+plot_df = plot_df.sort_values(["dataset", "codon_position"])
+
+# ---- MAKE COLORS (same as before) ----
+dataset_colors = make_genus_colors(ordered_datasets)
+
+# ---- PLOT ----
+sns.set_theme(style="whitegrid")
+fig, ax = plt.subplots(figsize=(16, 6))
+
+x_positions = np.arange(len(ordered_datasets))
+bar_width = 0.22
+
+# offsets for codon positions 1,2,3
+offsets = {
+    1: -bar_width,
+    2: 0,
+    3: bar_width
+}
+
+for pos in [1, 2, 3]:
+    sub = plot_df[plot_df["codon_position"] == pos]
+
+    heights = []
+    colors = []
+
+    for ds in ordered_datasets:
+        row = sub[sub["dataset"] == ds]
+        if not row.empty:
+            heights.append(row["proportion"].values[0])
+        else:
+            heights.append(0)
+        colors.append(dataset_colors[ds])
+
+    hatch_map = {
+        1: "",     # plain
+        2: "///",  # striped
+        3: "...",  # dotted
+}
+
+    ax.bar(
+        x_positions + offsets[pos],
+        heights,
+        width=bar_width,
+        color=colors,
+        edgecolor="black",   # needed for hatch visibility
+        linewidth=0.5,
+        hatch=hatch_map[pos],
+        label=f"Position {pos}"
+)
+
+#axis
+
+ax.set_xticks(x_positions)
+ax.set_xticklabels([SPECIES_LABELS.get(ds, ds) for ds in ordered_datasets], rotation=45, ha="right")
+ax.set_xlabel("Species")
+ax.set_ylabel("Proportion of coding SNPs")
+ax.set_ylim(0, 1)
+ax.set_title("Codon Position Bias of Singleton SNPs", fontsize=14, pad=15)
+
+#legend
+ax.legend(title="Codon position")
+
+sns.despine()
+plt.tight_layout()
+plt.savefig("codon_position_bias.png", dpi=300, bbox_inches="tight")
+plt.show()
