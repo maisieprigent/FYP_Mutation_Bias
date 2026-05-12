@@ -1,0 +1,39 @@
+# Number of SNPs resulting in G or C
+import glob
+
+def count_gc_in_alt(vcf_file):
+    gc_count = 0
+    total_bases = 0
+
+    with open(vcf_file, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+
+            fields = line.strip().split('\t')
+            alt = fields[4]
+            alleles = alt.split(',')
+
+            for allele in alleles:
+                for base in allele.upper():
+                    if base in ['G', 'C']:
+                        gc_count += 1
+                    if base in ['A', 'T', 'G', 'C']:
+                        total_bases += 1
+
+    return gc_count, total_bases
+
+
+vcf_files = glob.glob("Initial_Files/removed_recombination/*_removed_rows.vcf") #change file path to whichever files you want checking
+
+for vcf in vcf_files:
+    gc, total = count_gc_in_alt(vcf)
+    proportion = gc / total if total > 0 else 0
+    print(f"{vcf}: GC={gc}, Total={total}, GC%={proportion:.4f}")
+    
+with open("gc_summary_recombination.txt", "w") as out:          #change file name to one corresponding to input files
+    out.write("file\tgc_count\ttotal\tgc_fraction\n")
+    for vcf in vcf_files:
+        gc, total = count_gc_in_alt(vcf)
+        proportion = gc / total if total > 0 else 0
+        out.write(f"{vcf}\t{gc}\t{total}\t{proportion:.4f}\n")
